@@ -936,6 +936,18 @@ class PlanConfig(BaseModel):
         default=False,
         description="Whether plan mode is enabled for this agent",
     )
+    auto_enabled: bool = Field(
+        default=True,
+        description="Whether complex user requests may auto-enter plan mode",
+    )
+    auto_execute: bool = Field(
+        default=False,
+        description="Whether auto-created plans should execute immediately",
+    )
+    complexity_threshold: str = Field(
+        default="medium",
+        description="Complexity threshold for automatic planning",
+    )
 
 
 class AgentProfileConfig(BaseModel):

@@ -42,6 +42,7 @@ from ...agents.skill_runtime import (
 )
 from ...config.config import load_agent_config
 from ...constant import WORKING_DIR
+from ...plan.intent_router import PlanIntentRouter
 
 if TYPE_CHECKING:
     from ...agents.memory import BaseMemoryManager
@@ -448,6 +449,7 @@ class AgentRunner(Runner):
             # Skill routing: explicit slash/name, bare skill name, or
             # high-confidence description intent match.
             skill_route: SkillRoute | None = None
+            skill_response: Msg | None = None
             if mission_info is None:
                 try:
                     enabled_skills = discover_enabled_skills(_ws, channel)
@@ -467,31 +469,33 @@ class AgentRunner(Runner):
                             skill_route.reason,
                             skill_route.candidates,
                         )
-                        skill_response = self._maybe_inject_skill(
-                            query,
-                            msgs,
-                            skill_route,
-                        )
-                        if skill_response is not None:
-                            yield skill_response, True
-                            return
+                        if skill_route.kind in {"list", "info"}:
+                            skill_response = self._maybe_inject_skill(
+                                query,
+                                msgs,
+                                skill_route,
+                            )
+                            if skill_response is not None:
+                                yield skill_response, True
+                                return
                 except Exception:
                     logger.warning("Skill routing failed", exc_info=True)
 
             # --- Plan Mode ------------------------------------------
             plan_notebook = None
-            plan_enabled = getattr(
-                getattr(agent_config, "plan", None),
-                "enabled",
-                False,
-            )
+            plan_cfg = getattr(agent_config, "plan", None)
+            plan_enabled = getattr(plan_cfg, "enabled", False)
             if plan_enabled:
                 try:
                     from agentscope.plan import (
                         PlanNotebook,
                         InMemoryPlanStorage,
                     )
-                    from ...plan.hints import SimplePlanToHint, set_plan_gate
+                    from ...plan.hints import (
+                        SimplePlanToHint,
+                        set_plan_auto_execute,
+                        set_plan_gate,
+                    )
 
                     hint_gen = SimplePlanToHint()
                     plan_notebook = PlanNotebook(
@@ -505,6 +509,10 @@ class AgentRunner(Runner):
                         plan_desc = query.strip()[6:].strip()
                         if plan_desc:
                             set_plan_gate(plan_notebook, enabled=True)
+                            set_plan_auto_execute(
+                                plan_notebook,
+                                enabled=False,
+                            )
                             self._rewrite_last_message_text(
                                 msgs,
                                 plan_desc,
@@ -513,6 +521,45 @@ class AgentRunner(Runner):
                                 "Plan mode: /plan gate set, desc=%s",
                                 plan_desc[:60],
                             )
+                    elif (
+                        mission_info is None
+                        and (
+                            skill_route is None
+                            or skill_route.reason == "semantic_description"
+                        )
+                    ):
+                        route = PlanIntentRouter(
+                            threshold=getattr(
+                                plan_cfg,
+                                "complexity_threshold",
+                                "medium",
+                            ),
+                            auto_enabled=getattr(
+                                plan_cfg,
+                                "auto_enabled",
+                                True,
+                            ),
+                        ).route(query)
+                        if route is not None:
+                            set_plan_gate(plan_notebook, enabled=True)
+                            set_plan_auto_execute(
+                                plan_notebook,
+                                enabled=getattr(
+                                    plan_cfg,
+                                    "auto_execute",
+                                    False,
+                                ),
+                            )
+                            logger.info(
+                                "Plan router result: reason=%s score=%s "
+                                "matched=%s auto_execute=%s",
+                                route.reason,
+                                route.score,
+                                route.matched,
+                                getattr(plan_cfg, "auto_execute", False),
+                            )
+                            if query:
+                                self._rewrite_last_message_text(msgs, query)
 
                     # Register SSE broadcast hook + state tracking
                     from ...plan.broadcast import broadcast_plan_update
@@ -560,6 +607,20 @@ class AgentRunner(Runner):
                         exc_info=True,
                     )
                     plan_notebook = None
+
+            if (
+                skill_route is not None
+                and skill_route.kind == "invoke"
+                and not getattr(plan_notebook, "_plan_tool_gate", False)
+            ):
+                skill_response = self._maybe_inject_skill(
+                    query,
+                    msgs,
+                    skill_route,
+                )
+                if skill_response is not None:
+                    yield skill_response, True
+                    return
 
             agent = QwenPawAgent(
                 agent_config=agent_config,

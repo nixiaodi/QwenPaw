@@ -42,7 +42,12 @@ export function ReactAgentCard({
 }: ReactAgentCardProps) {
   const { t } = useTranslation();
   const { selectedAgent } = useAgentStore();
-  const [planEnabled, setPlanEnabled] = useState(false);
+  const [planConfig, setPlanConfig] = useState({
+    enabled: false,
+    auto_enabled: true,
+    auto_execute: false,
+    complexity_threshold: "medium",
+  });
   const [planLoading, setPlanLoading] = useState(false);
 
   useEffect(() => {
@@ -50,7 +55,7 @@ export function ReactAgentCard({
     planApi
       .getPlanConfig()
       .then((cfg) => {
-        if (!cancelled) setPlanEnabled(cfg.enabled);
+        if (!cancelled) setPlanConfig(cfg);
       })
       .catch(() => {});
     return () => {
@@ -58,21 +63,22 @@ export function ReactAgentCard({
     };
   }, [selectedAgent]);
 
-  const handlePlanToggle = useCallback(
-    async (checked: boolean) => {
+  const updatePlanConfig = useCallback(
+    async (patch: Partial<typeof planConfig>) => {
       setPlanLoading(true);
-      const prev = planEnabled;
-      setPlanEnabled(checked);
+      const prev = planConfig;
+      const next = { ...planConfig, ...patch };
+      setPlanConfig(next);
       try {
-        const res = await planApi.updatePlanConfig({ enabled: checked });
-        setPlanEnabled(res.enabled);
+        const res = await planApi.updatePlanConfig(next);
+        setPlanConfig(res);
       } catch {
-        setPlanEnabled(prev);
+        setPlanConfig(prev);
       } finally {
         setPlanLoading(false);
       }
     },
-    [planEnabled],
+    [planConfig],
   );
 
   return (
@@ -231,9 +237,39 @@ export function ReactAgentCard({
         )}
       >
         <Switch
-          checked={planEnabled}
+          checked={planConfig.enabled}
           loading={planLoading}
-          onChange={handlePlanToggle}
+          onChange={(checked) => updatePlanConfig({ enabled: checked })}
+        />
+      </Form.Item>
+
+      <Form.Item
+        label={t("agentConfig.planAutoMode", "Auto Plan")}
+        tooltip={t(
+          "agentConfig.planAutoModeTooltip",
+          "Automatically create a plan for complex multi-step tasks when plan mode is enabled",
+        )}
+      >
+        <Switch
+          checked={planConfig.auto_enabled}
+          loading={planLoading}
+          disabled={!planConfig.enabled}
+          onChange={(checked) => updatePlanConfig({ auto_enabled: checked })}
+        />
+      </Form.Item>
+
+      <Form.Item
+        label={t("agentConfig.planAutoExecute", "Auto Execute Plan")}
+        tooltip={t(
+          "agentConfig.planAutoExecuteTooltip",
+          "Continue executing an automatically created plan without waiting for confirmation",
+        )}
+      >
+        <Switch
+          checked={planConfig.auto_execute}
+          loading={planLoading}
+          disabled={!planConfig.enabled || !planConfig.auto_enabled}
+          onChange={(checked) => updatePlanConfig({ auto_execute: checked })}
         />
       </Form.Item>
     </Card>

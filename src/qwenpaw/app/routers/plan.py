@@ -113,7 +113,14 @@ async def get_current_plan(
 async def get_plan_config(request: Request) -> PlanConfigResponse:
     workspace = await _get_workspace(request)
     plan_cfg = workspace.config.plan
-    return PlanConfigResponse(enabled=plan_cfg.enabled)
+    if plan_cfg is None:
+        plan_cfg = PlanConfig()
+    return PlanConfigResponse(
+        enabled=plan_cfg.enabled,
+        auto_enabled=plan_cfg.auto_enabled,
+        auto_execute=plan_cfg.auto_execute,
+        complexity_threshold=plan_cfg.complexity_threshold,
+    )
 
 
 @router.put(
@@ -129,8 +136,16 @@ async def put_plan_config(
     if workspace.config.plan is None:
         workspace.config.plan = PlanConfig()
     workspace.config.plan.enabled = body.enabled
+    workspace.config.plan.auto_enabled = body.auto_enabled
+    workspace.config.plan.auto_execute = body.auto_execute
+    workspace.config.plan.complexity_threshold = body.complexity_threshold
     save_agent_config(workspace.agent_id, workspace.config)
-    return PlanConfigResponse(enabled=workspace.config.plan.enabled)
+    return PlanConfigResponse(
+        enabled=workspace.config.plan.enabled,
+        auto_enabled=workspace.config.plan.auto_enabled,
+        auto_execute=workspace.config.plan.auto_execute,
+        complexity_threshold=workspace.config.plan.complexity_threshold,
+    )
 
 
 @router.get(

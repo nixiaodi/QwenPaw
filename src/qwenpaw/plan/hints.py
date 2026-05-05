@@ -41,6 +41,15 @@ def set_plan_gate(  # pylint: disable=protected-access
         plan_notebook._plan_tool_gate = enabled
 
 
+def set_plan_auto_execute(  # pylint: disable=protected-access
+    plan_notebook,
+    enabled: bool = True,
+) -> None:
+    """Mark whether the current plan flow should execute immediately."""
+    if plan_notebook is not None:
+        plan_notebook._qp_plan_auto_execute = enabled
+
+
 def check_plan_tool_gate(  # pylint: disable=protected-access
     plan_notebook,
     tool_name: str,
@@ -85,7 +94,7 @@ def should_skip_auto_continue(  # pylint: disable=protected-access
     val = bool(getattr(plan_notebook, "_plan_just_mutated", False))
     if val:
         plan_notebook._plan_just_mutated = False
-        return True
+        return not bool(getattr(plan_notebook, "_qp_plan_auto_execute", False))
 
     if (
         bool(getattr(plan_notebook, "_plan_recently_finished", False))
@@ -220,6 +229,17 @@ if _HAS_DEFAULT_HINT:
             "user confirmation.\n"
         )
 
+        auto_no_plan: str | None = (
+            "There is no active plan yet.\n"
+            + _LANG_BLOCK
+            + "This is an auto-planned complex task. Call 'create_plan' to "
+            "decompose the user's request into an executable plan with "
+            "subtasks. Each subtask needs: name, description, "
+            "expected_outcome. Order by dependency.\n"
+            "After 'create_plan' succeeds, do NOT wait for user "
+            "confirmation; continue execution immediately.\n"
+        )
+
         at_the_beginning_after_mutation: str = (
             "The current plan:\n```\n{plan}\n```\n"
             + _LANG_BLOCK
@@ -228,6 +248,15 @@ if _HAS_DEFAULT_HINT:
             "Do NOT call 'revise_current_plan' again — the user has not "
             "responded to the updated plan yet.\n"
             "Do NOT execute any subtask until the user confirms.\n"
+        )
+
+        auto_at_the_beginning_after_mutation: str = (
+            "The current plan:\n```\n{plan}\n```\n"
+            + _LANG_BLOCK
+            + "This auto plan was JUST created. Do NOT wait for user "
+            "confirmation. Call 'update_subtask_state' with subtask_idx=0 "
+            "and state='in_progress', then begin executing that subtask. "
+            "Include a tool call in this turn.\n"
         )
 
         recently_finished_guard: str | None = (
@@ -245,6 +274,8 @@ if _HAS_DEFAULT_HINT:
         def _hint_no_plan(self, nb) -> str | None:
             """Select hint when there is no active plan."""
             if nb is not None and getattr(nb, "_plan_tool_gate", False):
+                if getattr(nb, "_qp_plan_auto_execute", False):
+                    return self.auto_no_plan
                 return self.no_plan
             if nb is not None and getattr(
                 nb,
@@ -264,6 +295,14 @@ if _HAS_DEFAULT_HINT:
             )
 
             if n_ip == 0 and n_done == 0 and n_abn == 0:
+                if (
+                    just_mutated
+                    and nb is not None
+                    and getattr(nb, "_qp_plan_auto_execute", False)
+                ):
+                    return self.auto_at_the_beginning_after_mutation.format(
+                        plan=plan.to_markdown(),
+                    )
                 tmpl = (
                     self.at_the_beginning_after_mutation
                     if just_mutated

@@ -26,6 +26,9 @@ export interface PlanStateResponse {
 
 export interface PlanConfigResponse {
   enabled: boolean;
+  auto_enabled: boolean;
+  auto_execute: boolean;
+  complexity_threshold: string;
 }
 
 export const planApi = {

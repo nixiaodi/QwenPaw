@@ -46,6 +46,11 @@ from ..utils import file_url_to_local_path
 
 logger = logging.getLogger(__name__)
 
+_EMPTY_RESPONSE_FALLBACK = (
+    "模型本轮没有返回可展示内容，也没有产生工具调用。"
+    "请检查模型/tool-call 配置或稍后重试。"
+)
+
 # ANSI colour helpers (degrade gracefully if not a tty)
 _USE_COLOR = hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
 
@@ -394,6 +399,23 @@ class ConsoleChannel(BaseChannel):
                             )
                             if media_message:
                                 event.output.append(media_message)
+                    if not event.output:
+                        logger.warning(
+                            "console completed with empty response output; "
+                            "injecting fallback message",
+                        )
+                        event.output.append(
+                            Message(
+                                type=MessageType.MESSAGE,
+                                role="assistant",
+                                content=[
+                                    TextContent(
+                                        type=ContentType.TEXT,
+                                        text=_EMPTY_RESPONSE_FALLBACK,
+                                    ),
+                                ],
+                            ),
+                        )
 
                 if obj == "response":
                     usage_data = self._extract_token_usage(session_id)

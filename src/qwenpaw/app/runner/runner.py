@@ -8,7 +8,6 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, AsyncGenerator, Coroutine
 
-import frontmatter as fm
 from agentscope.message import Msg, TextBlock
 from agentscope_runtime.engine.runner import Runner
 from agentscope_runtime.engine.schemas.agent_schemas import AgentRequest
@@ -33,8 +32,13 @@ from .utils import build_env_context
 from ..channels.schema import DEFAULT_CHANNEL
 from ...agents.react_agent import QwenPawAgent
 from ...exceptions import convert_model_exception
-from ...agents.utils.file_handling import (
-    read_text_file_with_encoding_fallback,
+from ...agents.skill_runtime import (
+    SkillIntentRouter,
+    SkillRoute,
+    discover_enabled_skills,
+    render_skill_info,
+    render_skill_list,
+    route_to_prompt,
 )
 from ...config.config import load_agent_config
 from ...constant import WORKING_DIR
@@ -186,76 +190,56 @@ class AgentRunner(Runner):
     def _maybe_inject_skill(
         query: str | None,
         msgs: list,
-        skills: dict,
+        route: SkillRoute | None,
     ) -> Msg | None:
-        """Handle ``/<skill_name> [input]`` or ``/[skill name] [input]``.
-
-        *skills* is ``agent.toolkit.skills`` — already resolved for
-        the current channel during agent init.  Hot-reload safe because
-        the agent is recreated on every query.
+        """Apply a resolved skill route to the current turn.
 
         Returns a ``Msg`` to short-circuit (skill info), or ``None``
         to continue to the LLM with rewritten ``msgs``.
         """
-        if not query or not query.startswith("/") or not msgs:
+        if route is None:
             return None
 
-        parsed = AgentRunner._parse_skill_query(query)
-        if not parsed:
-            return None
-        name, user_input = parsed
-
-        # Lookup by folder name
-        skill = next(
-            (
-                s
-                for s in skills.values()
-                if Path(s["dir"]).name.lower() == name
-            ),
-            None,
-        )
-        if not skill:
-            return None
-
-        skill_dir = Path(skill["dir"])
-        skill_md = skill_dir / "SKILL.md"
-        if not skill_md.exists():
-            return None
-
-        raw = read_text_file_with_encoding_fallback(skill_md)
-        post = fm.loads(raw)
-        display_name = post.get("name") or name
-
-        # /<name> without input → return skill info.
-        if not user_input:
-            desc = post.get("description") or "No description."
-            logger.info("Skill info: %s", name)
+        if route.kind == "list":
             return Msg(
                 name="Friday",
                 role="assistant",
                 content=[
                     TextBlock(
                         type="text",
-                        text=(
-                            f"**{name}**\n\n"
-                            f"- **command**: `/{name} <input>` to invoke\n"
-                            f"- **name**: {display_name}\n"
-                            f"- **description**: {desc}\n"
-                            f"- **path**: `{skill_dir}`"
-                        ),
+                        text=render_skill_list(list(route.skills)),
                     ),
                 ],
             )
 
-        # /<name> <input> → rewrite user message with skill body.
-        merged = (
-            f"Use the [{display_name}] skill in "
-            f"`{skill_dir}` to fulfill "
-            f"user's task: {user_input}\n\n"
-            f"{post.content}"
-        )
-        AgentRunner._rewrite_last_message_text(msgs, merged)
-        logger.info("Skill invocation: %s", name)
+        if route.kind == "info" and route.skill is not None:
+            logger.info("Skill info: %s", route.skill.name)
+            return Msg(
+                name="Friday",
+                role="assistant",
+                content=[
+                    TextBlock(
+                        type="text",
+                        text=render_skill_info(route.skill),
+                    ),
+                ],
+            )
+
+        if route.kind == "invoke" and msgs:
+            original = query or ""
+            prompt = route_to_prompt(route)
+            if prompt:
+                AgentRunner._rewrite_last_message_text(
+                    msgs,
+                    prompt + original,
+                )
+                logger.info(
+                    "Skill invocation routed: skill=%s reason=%s "
+                    "candidates=%s",
+                    route.skill.name if route.skill else "",
+                    route.reason,
+                    route.candidates,
+                )
         return None
 
     @staticmethod
@@ -461,6 +445,39 @@ class AgentRunner(Runner):
                     refresher + original,
                 )
 
+            # Skill routing: explicit slash/name, bare skill name, or
+            # high-confidence description intent match.
+            skill_route: SkillRoute | None = None
+            if mission_info is None:
+                try:
+                    enabled_skills = discover_enabled_skills(_ws, channel)
+                    skill_route = SkillIntentRouter(enabled_skills).route(
+                        query,
+                    )
+                    if skill_route is not None:
+                        logger.info(
+                            "Skill router result: kind=%s skill=%s "
+                            "reason=%s candidates=%s",
+                            skill_route.kind,
+                            (
+                                skill_route.skill.name
+                                if skill_route.skill is not None
+                                else ""
+                            ),
+                            skill_route.reason,
+                            skill_route.candidates,
+                        )
+                        skill_response = self._maybe_inject_skill(
+                            query,
+                            msgs,
+                            skill_route,
+                        )
+                        if skill_response is not None:
+                            yield skill_response, True
+                            return
+                except Exception:
+                    logger.warning("Skill routing failed", exc_info=True)
+
             # --- Plan Mode ------------------------------------------
             plan_notebook = None
             plan_enabled = getattr(
@@ -595,17 +612,6 @@ class AgentRunner(Runner):
                     f"ChatManager is None! Cannot auto-register chat for "
                     f"session_id={session_id}",
                 )
-
-            # Skill info (/<name> without input) is display-only
-            if mission_info is None:
-                skill_response = self._maybe_inject_skill(
-                    query,
-                    msgs,
-                    agent.toolkit.skills,
-                )
-                if skill_response is not None:
-                    yield skill_response, True
-                    return
 
             # Ensure session file has a valid plan_notebook dict
             # to prevent TypeError/KeyError during load_state_dict

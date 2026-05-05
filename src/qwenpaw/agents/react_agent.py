@@ -51,6 +51,7 @@ from .tools import (
     glob_search,
     grep_search,
     list_agents,
+    load_skill,
     read_file,
     send_file_to_user,
     set_user_timezone,
@@ -274,6 +275,7 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
             "get_token_usage": get_token_usage,
             "delegate_external_agent": delegate_external_agent,
             "list_agents": list_agents,
+            "load_skill": load_skill,
             "chat_with_agent": chat_with_agent,
             "submit_to_agent": submit_to_agent,
             "check_agent_task": check_agent_task,
@@ -1284,12 +1286,14 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
         """
         # Set workspace_dir and recent_max_bytes in context for tool functions
         from ..config.context import (
+            set_current_channel_name,
             set_current_workspace_dir,
             set_current_recent_max_bytes,
             set_current_shell_command_timeout,
         )
 
         set_current_workspace_dir(self._workspace_dir)
+        set_current_channel_name(self._request_context.get("channel"))
         light_ctx = self._agent_config.running.light_context_config
         pruning_config = light_ctx.tool_result_pruning_config
         set_current_recent_max_bytes(

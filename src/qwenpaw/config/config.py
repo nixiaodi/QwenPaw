@@ -1325,6 +1325,12 @@ def _default_builtin_tools() -> Dict[str, BuiltinToolConfig]:
             description="List configured agents from the local API",
             icon="🤖",
         ),
+        "load_skill": BuiltinToolConfig(
+            name="load_skill",
+            enabled=True,
+            description="Load an enabled local skill definition",
+            icon="🧩",
+        ),
         "chat_with_agent": BuiltinToolConfig(
             name="chat_with_agent",
             enabled=True,
@@ -1390,6 +1396,7 @@ def build_qa_agent_tools_config() -> ToolsConfig:
             "write_file",
             "edit_file",
             "view_image",
+            "load_skill",
         },
     )
     builtin_tools = {
@@ -1413,6 +1420,7 @@ def build_local_agent_tools_config() -> ToolsConfig:
             "chat_with_agent",
             "submit_to_agent",
             "check_agent_task",
+            "load_skill",
             "execute_shell_command",
             "read_file",
             "write_file",

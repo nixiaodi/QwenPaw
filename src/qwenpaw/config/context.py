@@ -81,3 +81,20 @@ def set_current_shell_command_timeout(timeout: float | None) -> None:
         timeout: Timeout in seconds.
     """
     current_shell_command_timeout.set(timeout)
+
+
+# Context variable to store the current channel name.
+current_channel_name: ContextVar[str | None] = ContextVar(
+    "current_channel_name",
+    default=None,
+)
+
+
+def get_current_channel_name() -> str | None:
+    """Get the current channel name from context."""
+    return current_channel_name.get()
+
+
+def set_current_channel_name(channel_name: str | None) -> None:
+    """Set the current channel name for tool functions."""
+    current_channel_name.set(channel_name)

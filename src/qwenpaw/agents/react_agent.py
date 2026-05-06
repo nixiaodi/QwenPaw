@@ -52,6 +52,7 @@ from .tools import (
     grep_search,
     list_agents,
     load_skill,
+    ask_user_input,
     read_file,
     send_file_to_user,
     set_user_timezone,
@@ -276,6 +277,7 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
             "delegate_external_agent": delegate_external_agent,
             "list_agents": list_agents,
             "load_skill": load_skill,
+            "ask_user_input": ask_user_input,
             "chat_with_agent": chat_with_agent,
             "submit_to_agent": submit_to_agent,
             "check_agent_task": check_agent_task,
@@ -405,6 +407,27 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
         multimodal_hint = build_multimodal_hint()
         if multimodal_hint:
             sys_prompt = sys_prompt + "\n\n" + multimodal_hint
+
+        sys_prompt = (
+            sys_prompt
+            + "\n\n"
+            + "Structured clarification guidance:\n"
+            + "- Use `ask_user_input` only when missing user details would "
+            + "materially change the task outcome.\n"
+            + "- For complex planned work, ask for critical missing details "
+            + "before `create_plan`; otherwise proceed with sensible "
+            + "defaults.\n"
+            + "- When asking, provide concise options and include a "
+            + "recommended default when one is safe.\n"
+            + "- Preferred `ask_user_input` question shape: "
+            + "`{\"name\":\"travel_date\",\"label\":\"出行日期？\","
+            + "\"type\":\"single_choice\",\"options\":[\"近期周末（默认）\","
+            + "\"工作日\",\"自定义日期\"],\"required\":true}`. "
+            + "For every choice question, include 2-4 concrete options; "
+            + "the UI also supports a custom answer.\n"
+            + "- Do not ask about trivial preferences that can be handled "
+            + "with reasonable defaults.\n"
+        )
 
         if self._env_context is not None:
             sys_prompt = sys_prompt + "\n\n" + self._env_context
@@ -1289,11 +1312,13 @@ class QwenPawAgent(ToolGuardMixin, ReActAgent):
             set_current_channel_name,
             set_current_workspace_dir,
             set_current_recent_max_bytes,
+            set_current_request_context,
             set_current_shell_command_timeout,
         )
 
         set_current_workspace_dir(self._workspace_dir)
         set_current_channel_name(self._request_context.get("channel"))
+        set_current_request_context(self._request_context)
         light_ctx = self._agent_config.running.light_context_config
         pruning_config = light_ctx.tool_result_pruning_config
         set_current_recent_max_bytes(

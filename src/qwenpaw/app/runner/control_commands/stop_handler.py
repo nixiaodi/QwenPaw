@@ -74,8 +74,23 @@ class StopCommandHandler(BaseControlCommandHandler):
             target_session_id,
             20,
         )
+        try:
+            from ....user_input.service import get_user_input_service
 
-        if stopped or cleared > 0:
+            user_input_service = get_user_input_service()
+            cancelled_inputs = await (
+                user_input_service.cancel_all_pending_by_root_session(
+                    target_session_id,
+                )
+            )
+        except Exception:
+            logger.debug(
+                "/stop: failed to cancel pending user input requests",
+                exc_info=True,
+            )
+            cancelled_inputs = 0
+
+        if stopped or cleared > 0 or cancelled_inputs > 0:
             logger.info(
                 f"/stop: stopped={stopped} cleared={cleared} "
                 f"chat_id={chat_id} session={target_session_id[:30]}",
@@ -85,6 +100,10 @@ class StopCommandHandler(BaseControlCommandHandler):
                 status_parts.append("running task stopped")
             if cleared > 0:
                 status_parts.append(f"{cleared} queued message(s) cleared")
+            if cancelled_inputs > 0:
+                status_parts.append(
+                    f"{cancelled_inputs} pending question(s) cancelled",
+                )
             status_text = " and ".join(status_parts)
             return (
                 f"**Task Stopped**\n\n"

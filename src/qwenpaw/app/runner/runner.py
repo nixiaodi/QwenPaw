@@ -243,6 +243,128 @@ class AgentRunner(Runner):
                 )
         return None
 
+    async def _maybe_resolve_skill_clarification(
+        self,
+        *,
+        route: SkillRoute | None,
+        query: str | None,
+        session_id: str,
+        root_session_id: str,
+        user_id: str,
+        channel: str,
+    ) -> tuple[SkillRoute | None, Msg | None]:
+        """Ask the user to choose a skill when routing is ambiguous."""
+        if route is None or route.kind != "clarify":
+            return route, None
+
+        from ...user_input.schemas import UserInputOption, UserInputQuestion
+        from ...user_input.service import get_user_input_service
+
+        options = [
+            UserInputOption(
+                label=skill.name,
+                value=skill.name,
+                description=skill.description or skill.display_name,
+            )
+            for skill in route.skills
+        ]
+        if not options:
+            return None, Msg(
+                name="Friday",
+                role="assistant",
+                content=[
+                    TextBlock(
+                        type="text",
+                        text="检测到多个可能的技能，但没有可展示的候选项。",
+                    ),
+                ],
+            )
+
+        service = get_user_input_service()
+        pending = await service.create_pending(
+            session_id=session_id,
+            root_session_id=root_session_id,
+            user_id=user_id,
+            channel=channel,
+            agent_id=self.agent_id,
+            title="选择要使用的技能",
+            questions=[
+                UserInputQuestion(
+                    id="skill",
+                    question=(
+                        "这个请求匹配到多个已启用技能，"
+                        "请选择本次要使用哪一个。"
+                    ),
+                    kind="single_choice",
+                    options=options,
+                    required=True,
+                ),
+            ],
+            timeout_seconds=300.0,
+        )
+        result = await service.wait_for_result(
+            pending.request_id,
+            pending.timeout_seconds,
+        )
+
+        if result.status != "answered":
+            logger.info(
+                "Skill clarification not answered: status=%s candidates=%s",
+                result.status,
+                route.candidates,
+            )
+            return None, Msg(
+                name="Friday",
+                role="assistant",
+                content=[
+                    TextBlock(
+                        type="text",
+                        text=(
+                            "我检测到多个可用技能都可能处理这个请求，"
+                            "但本次没有选择具体技能，已暂停执行。"
+                        ),
+                    ),
+                ],
+            )
+
+        selected_name = str(result.answers.get("skill") or "").strip()
+        selected = next(
+            (
+                skill
+                for skill in route.skills
+                if skill.name.lower() == selected_name.lower()
+            ),
+            None,
+        )
+        if selected is None:
+            logger.info(
+                "Skill clarification selected invalid skill: %s",
+                selected_name,
+            )
+            return None, Msg(
+                name="Friday",
+                role="assistant",
+                content=[
+                    TextBlock(
+                        type="text",
+                        text="选择的技能无效，请重新发起请求并选择可用技能。",
+                    ),
+                ],
+            )
+
+        logger.info(
+            "Skill clarification selected: skill=%s candidates=%s",
+            selected.name,
+            route.candidates,
+        )
+        return SkillRoute(
+            kind="invoke",
+            skill=selected,
+            args=query or "",
+            reason="semantic_user_selected",
+            candidates=route.candidates,
+        ), None
+
     @staticmethod
     def _rewrite_last_message_text(
         msgs: list,
@@ -474,6 +596,23 @@ class AgentRunner(Runner):
                                 query,
                                 msgs,
                                 skill_route,
+                            )
+                            if skill_response is not None:
+                                yield skill_response, True
+                                return
+                        if skill_route.kind == "clarify":
+                            (
+                                skill_route,
+                                skill_response,
+                            ) = await self._maybe_resolve_skill_clarification(
+                                route=skill_route,
+                                query=query,
+                                session_id=session_id,
+                                root_session_id=base_request_context[
+                                    "root_session_id"
+                                ],
+                                user_id=user_id,
+                                channel=channel,
                             )
                             if skill_response is not None:
                                 yield skill_response, True

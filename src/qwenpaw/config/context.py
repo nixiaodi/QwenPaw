@@ -98,3 +98,20 @@ def get_current_channel_name() -> str | None:
 def set_current_channel_name(channel_name: str | None) -> None:
     """Set the current channel name for tool functions."""
     current_channel_name.set(channel_name)
+
+
+# Context variable to store the current agent request context.
+current_request_context: ContextVar[dict[str, str] | None] = ContextVar(
+    "current_request_context",
+    default=None,
+)
+
+
+def get_current_request_context() -> dict[str, str] | None:
+    """Get the current request context for tool functions."""
+    return current_request_context.get()
+
+
+def set_current_request_context(context: dict[str, str] | None) -> None:
+    """Set the current request context for tool functions."""
+    current_request_context.set(dict(context) if context is not None else None)

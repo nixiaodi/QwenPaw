@@ -28,7 +28,7 @@ from .utils.file_handling import read_text_file_with_encoding_fallback
 
 logger = logging.getLogger(__name__)
 
-RouteKind = Literal["info", "list", "invoke"]
+RouteKind = Literal["info", "list", "invoke", "clarify"]
 
 
 @dataclass(frozen=True)
@@ -376,12 +376,28 @@ class SkillIntentRouter:
         candidates = tuple((skill.name, score) for skill, score in scored[:3])
         best, best_score = scored[0]
         second_score = scored[1][1] if len(scored) > 1 else 0
-        if best_score < 8 or (second_score and best_score - second_score <= 2):
+        if best_score < 8:
             logger.info(
                 "Skill router: semantic match not confident: %s",
                 candidates,
             )
             return None
+        if second_score and best_score - second_score <= 2:
+            logger.info(
+                "Skill router: semantic match ambiguous: %s",
+                candidates,
+            )
+            return SkillRoute(
+                kind="clarify",
+                args=text,
+                reason="semantic_ambiguous",
+                candidates=candidates,
+                skills=tuple(
+                    skill
+                    for skill, score in scored[:3]
+                    if best_score - score <= 2
+                ),
+            )
         return SkillRoute(
             kind="invoke",
             skill=best,

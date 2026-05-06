@@ -67,15 +67,16 @@ def check_plan_tool_gate(  # pylint: disable=protected-access
         return None
     if not getattr(plan_notebook, "_plan_tool_gate", False):
         return None
-    if tool_name == "create_plan":
+    if tool_name in {"create_plan", "ask_user_input"}:
         return None
     return (
         f"Tool '{tool_name}' is not available right now. "
-        "You MUST call 'create_plan' first to define the plan and its "
-        "subtasks. Decompose the user's request into a logical pipeline: "
-        "each subtask needs a clear name, description, and measurable "
-        "expected_outcome. Write plan text in the same language as the "
-        "user's request."
+        "You MUST call 'ask_user_input' first if critical user details are "
+        "missing, otherwise call 'create_plan' to define the plan and its "
+        "subtasks. Decompose the user's request into a logical pipeline: each "
+        "subtask needs a clear name, description, and measurable "
+        "expected_outcome. Write plan text in the same language as the user's "
+        "request."
     )
 
 
@@ -222,9 +223,15 @@ if _HAS_DEFAULT_HINT:
         no_plan: str | None = (
             "There is no active plan yet.\n"
             + _LANG_BLOCK
-            + "Call 'create_plan' to decompose the user's request into a "
-            "structured plan with subtasks. Each subtask needs: name, "
-            "description, expected_outcome. Order by dependency.\n"
+            + "If critical user details are missing and would materially "
+            "change the result, call 'ask_user_input' first with concise "
+            "choices and a recommended default. Use question objects like "
+            "{name, label, type, options, required}; for each choice question "
+            "provide 2-4 concrete options, and the UI supports a final custom "
+            "answer. Otherwise call 'create_plan' "
+            "to decompose the user's request into a structured plan with "
+            "subtasks. Each subtask needs: name, description, "
+            "expected_outcome. Order by dependency.\n"
             "After 'create_plan' succeeds, present the plan and wait for "
             "user confirmation.\n"
         )
@@ -232,10 +239,16 @@ if _HAS_DEFAULT_HINT:
         auto_no_plan: str | None = (
             "There is no active plan yet.\n"
             + _LANG_BLOCK
-            + "This is an auto-planned complex task. Call 'create_plan' to "
-            "decompose the user's request into an executable plan with "
-            "subtasks. Each subtask needs: name, description, "
-            "expected_outcome. Order by dependency.\n"
+            + "This is an auto-planned complex task. If critical user "
+            "details are missing and would materially change the result, call "
+            "'ask_user_input' first with concise choices and a recommended "
+            "default. Use question objects like {name, label, type, options, "
+            "required}; for each choice question provide 2-4 concrete "
+            "options, and the UI supports a final custom answer. Otherwise "
+            "call 'create_plan' to decompose the user's "
+            "request into an executable plan with subtasks. Each subtask "
+            "needs: name, description, expected_outcome. Order by "
+            "dependency.\n"
             "After 'create_plan' succeeds, do NOT wait for user "
             "confirmation; continue execution immediately.\n"
         )

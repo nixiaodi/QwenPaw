@@ -29,6 +29,7 @@ from .agent_management import (
     check_agent_task,
 )
 from .delegate_external_agent import delegate_external_agent
+from .user_input import ask_user_input
 from ..skill_runtime import load_skill
 
 __all__ = [
@@ -51,6 +52,7 @@ __all__ = [
     "set_user_timezone",
     "get_token_usage",
     "delegate_external_agent",
+    "ask_user_input",
     "load_skill",
     "list_agents",
     "chat_with_agent",

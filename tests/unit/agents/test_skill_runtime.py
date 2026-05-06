@@ -99,13 +99,41 @@ def test_semantic_image_request_matches_image_skill_description(tmp_path):
     assert route.reason == "semantic_description"
 
 
-def test_ambiguous_semantic_match_does_not_force_skill(tmp_path):
+def test_semantic_tie_returns_clarify_route(tmp_path):
+    _write_skill(
+        tmp_path,
+        "docx",
+        "Create or edit professional documents and artifacts.",
+    )
+    _write_skill(tmp_path, "imagegen", "Generate or edit raster images.")
+    _write_skill(
+        tmp_path,
+        "nano-banana-pro-1.0.1",
+        "Generate and edit images with Nano Banana Pro.",
+    )
+
+    route = _router(tmp_path).route("帮我画一只小猫的图片")
+
+    assert route is not None
+    assert route.kind == "clarify"
+    assert route.reason == "semantic_ambiguous"
+    assert {skill.name for skill in route.skills} == {
+        "docx",
+        "imagegen",
+        "nano-banana-pro-1.0.1",
+    }
+
+
+def test_ambiguous_semantic_match_asks_user_to_choose(tmp_path):
     _write_skill(tmp_path, "imagegen", "Generate or edit raster images.")
     _write_skill(tmp_path, "poster", "Generate image posters.")
 
     route = _router(tmp_path).route("我想画一张小猫的图片")
 
-    assert route is None
+    assert route is not None
+    assert route.kind == "clarify"
+    assert route.reason == "semantic_ambiguous"
+    assert {skill.name for skill in route.skills} == {"imagegen", "poster"}
 
 
 def test_load_skill_rejects_disabled_skill(tmp_path):

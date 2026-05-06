@@ -1343,6 +1343,12 @@ def _default_builtin_tools() -> Dict[str, BuiltinToolConfig]:
             description="Load an enabled local skill definition",
             icon="🧩",
         ),
+        "ask_user_input": BuiltinToolConfig(
+            name="ask_user_input",
+            enabled=True,
+            description="Ask the user a structured clarification question",
+            icon="❔",
+        ),
         "chat_with_agent": BuiltinToolConfig(
             name="chat_with_agent",
             enabled=True,
@@ -1409,6 +1415,7 @@ def build_qa_agent_tools_config() -> ToolsConfig:
             "edit_file",
             "view_image",
             "load_skill",
+            "ask_user_input",
         },
     )
     builtin_tools = {
@@ -1433,6 +1440,7 @@ def build_local_agent_tools_config() -> ToolsConfig:
             "submit_to_agent",
             "check_agent_task",
             "load_skill",
+            "ask_user_input",
             "execute_shell_command",
             "read_file",
             "write_file",

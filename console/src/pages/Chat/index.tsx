@@ -28,7 +28,7 @@ import ChatActionGroup from "./components/ChatActionGroup";
 import ChatHeaderTitle from "./components/ChatHeaderTitle";
 import ChatSessionInitializer from "./components/ChatSessionInitializer";
 import { ApprovalCard } from "../../components/ApprovalCard/ApprovalCard";
-import ChatPlanPanel from "../../components/ChatPlanPanel";
+import TaskInteractionPanel from "../../components/TaskInteractionPanel";
 import { commandsApi } from "../../api/modules/commands";
 import { useApprovalContext } from "../../contexts/ApprovalContext";
 import { planApi } from "../../api/modules/plan";
@@ -1024,7 +1024,7 @@ export default function ChatPage() {
         ...(i18nConfig as any)?.sender,
         beforeSubmit: handleBeforeSubmit,
         allowSpeech: true,
-        beforeUI: <ChatPlanPanel enabled={planEnabled} />,
+        beforeUI: <TaskInteractionPanel planEnabled={planEnabled} />,
         attachments: {
           trigger: function (props: any) {
             const tooltipKey = multimodalCaps.supportsMultimodal

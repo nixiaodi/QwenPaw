@@ -971,6 +971,8 @@ export default function ChatPage() {
   const navigateRef = useRef(navigate);
   const chatRef = useRef<IAgentScopeRuntimeWebUIRef>(null);
   const pendingClearHistoryRef = useRef(false);
+  const resumeSyncInFlightRef = useRef(false);
+  const lastResumeSyncAtRef = useRef(0);
 
   useMessageHistoryNavigation(chatRef, isChatActive, isComposingRef);
   chatIdRef.current = chatId;
@@ -1066,6 +1068,65 @@ export default function ChatPage() {
       sessionApi.onSessionCreated = null;
     };
   }, []);
+
+  const syncCurrentChatAfterResume = useCallback(async () => {
+    if (!isChatActiveRef.current || resumeSyncInFlightRef.current) return;
+
+    const now = Date.now();
+    if (now - lastResumeSyncAtRef.current < 1500) return;
+    lastResumeSyncAtRef.current = now;
+
+    const sessionId = chatIdRef.current || window.currentSessionId || "";
+    if (!sessionId || sessionId === "undefined" || sessionId === "null") {
+      return;
+    }
+
+    resumeSyncInFlightRef.current = true;
+    try {
+      await sessionApi.getSessionList();
+      const realId = sessionApi.getRealIdForSession(sessionId) ?? sessionId;
+      if (!realId || /^\d+$/.test(realId)) return;
+
+      const history = await chatApi.getChat(realId);
+      if ((history.messages || []).length === 0) return;
+
+      const currentMessageCount =
+        chatRef.current?.messages?.getMessages?.()?.length ?? 0;
+      const backendMessageCount = history.messages.length;
+      const backendIdle = history.status === "idle";
+
+      if (backendIdle || backendMessageCount > currentMessageCount) {
+        setRefreshKey((prev) => prev + 1);
+      }
+    } catch (error) {
+      console.debug("[Chat resume sync] skipped:", error);
+    } finally {
+      resumeSyncInFlightRef.current = false;
+    }
+  }, []);
+
+  useEffect(() => {
+    const onResume = () => {
+      if (document.visibilityState === "visible") {
+        void syncCurrentChatAfterResume();
+      }
+    };
+    const onFocus = () => {
+      void syncCurrentChatAfterResume();
+    };
+    const onPageShow = () => {
+      void syncCurrentChatAfterResume();
+    };
+
+    document.addEventListener("visibilitychange", onResume);
+    window.addEventListener("focus", onFocus);
+    window.addEventListener("pageshow", onPageShow);
+    return () => {
+      document.removeEventListener("visibilitychange", onResume);
+      window.removeEventListener("focus", onFocus);
+      window.removeEventListener("pageshow", onPageShow);
+    };
+  }, [syncCurrentChatAfterResume]);
 
   // Setup multimodal capabilities tracking via custom hook
 

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Button, Input } from "antd";
 import { ChevronDown, ChevronUp, Circle, Dot, Send } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -25,6 +25,11 @@ function firstDefault(question: UserInputQuestion): AnswerValue {
   return { selected };
 }
 
+function buildQuestionKey(request: UserInputRequest): string {
+  const questionIds = request.questions.map((item) => item.id).join("|");
+  return `${request.request_id}:${request.question_index}:${questionIds}`;
+}
+
 function isAnswered(question: UserInputQuestion, value: AnswerValue): boolean {
   if (!question.required) return true;
   if (question.kind === "free_text") return Boolean(value.custom?.trim());
@@ -47,15 +52,22 @@ const UserInputPanel: React.FC<UserInputPanelProps> = ({
     });
     return initial;
   });
+  const questionKey = useMemo(() => buildQuestionKey(request), [request]);
+  const lastQuestionKeyRef = useRef(questionKey);
 
   useEffect(() => {
-    const initial: Record<string, AnswerValue> = {};
-    request.questions.forEach((item) => {
-      initial[item.id] = firstDefault(item);
+    if (lastQuestionKeyRef.current === questionKey) return;
+    lastQuestionKeyRef.current = questionKey;
+
+    setAnswers((prev) => {
+      const next: Record<string, AnswerValue> = {};
+      request.questions.forEach((item) => {
+        next[item.id] = prev[item.id] || firstDefault(item);
+      });
+      return next;
     });
-    setAnswers(initial);
     setExpanded(true);
-  }, [request.request_id, request.questions]);
+  }, [questionKey, request.questions]);
 
   const question = request.questions[0];
   const total = request.total_questions || request.questions.length || 1;

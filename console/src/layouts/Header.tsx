@@ -1,4 +1,4 @@
-import { Layout, Space, Badge, Spin, Tooltip } from "antd";
+import { Layout, Space, Badge, Spin } from "antd";
 import LanguageSwitcher from "../components/LanguageSwitcher/index";
 import ThemeToggleButton from "../components/ThemeToggleButton";
 import { useTranslation } from "react-i18next";
@@ -6,9 +6,6 @@ import { Button, Modal } from "@agentscope-ai/design";
 import styles from "./index.module.less";
 import api from "../api";
 import {
-  GITHUB_URL,
-  getDocsUrl,
-  getFaqUrl,
   getReleaseNotesUrl,
   PYPI_URL,
   ONE_HOUR_MS,
@@ -16,7 +13,6 @@ import {
   isStableVersion,
   compareVersions,
 } from "./constants";
-import { useTheme } from "../contexts/ThemeContext";
 import { useState, useEffect } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -51,7 +47,6 @@ function UpdateCodeBlock({ code }: { code: string }) {
 
 export default function Header() {
   const { t, i18n } = useTranslation();
-  const { isDark } = useTheme();
   const [version, setVersion] = useState<string>("");
   const [latestVersion, setLatestVersion] = useState<string>("");
   const [updateModalOpen, setUpdateModalOpen] = useState(false);
@@ -153,11 +148,7 @@ export default function Header() {
     <>
       <AntHeader className={styles.header}>
         <div className={styles.logoWrapper}>
-          <img
-            src={isDark ? "/logo-dark.svg" : "/logo-light.svg"}
-            alt="QwenPaw"
-            className={styles.logoImg}
-          />
+          <span className={styles.brandName}>WeldonAgent</span>
           <div className={styles.logoDivider} />
           {version && (
             <Badge
@@ -179,36 +170,6 @@ export default function Header() {
           )}
         </div>
         <Space size="middle">
-          <Tooltip title={t("header.changelog")}>
-            <Button
-              type="text"
-              onClick={() => handleNavClick(getReleaseNotesUrl(i18n.language))}
-            >
-              {t("header.changelog")}
-            </Button>
-          </Tooltip>
-          <Tooltip title={t("header.docs")}>
-            <Button
-              type="text"
-              onClick={() => handleNavClick(getDocsUrl(i18n.language))}
-            >
-              {t("header.docs")}
-            </Button>
-          </Tooltip>
-          <Tooltip title={t("header.faq")}>
-            <Button
-              type="text"
-              onClick={() => handleNavClick(getFaqUrl(i18n.language))}
-            >
-              {t("header.faq")}
-            </Button>
-          </Tooltip>
-          <Tooltip title={t("header.github")}>
-            <Button type="text" onClick={() => handleNavClick(GITHUB_URL)}>
-              {t("header.github")}
-            </Button>
-          </Tooltip>
-          <div className={styles.headerDivider} />
           <LanguageSwitcher />
           <ThemeToggleButton />
         </Space>

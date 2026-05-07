@@ -88,6 +88,28 @@ def test_explicit_chinese_invocation_matches_enabled_skill(tmp_path):
     assert route.reason == "explicit_skill_name"
 
 
+def test_inline_slash_skill_selection_bypasses_semantic_ambiguity(tmp_path):
+    _write_skill(
+        tmp_path,
+        "docx",
+        "Create or edit professional documents and artifacts.",
+    )
+    _write_skill(tmp_path, "imagegen", "Generate or edit raster images.")
+    _write_skill(
+        tmp_path,
+        "nano-banana-pro-1.0.1",
+        "Generate and edit images with Nano Banana Pro.",
+    )
+
+    route = _router(tmp_path).route("调用 /imagegen 帮我生成一张小猫的图片")
+
+    assert route is not None
+    assert route.kind == "invoke"
+    assert route.skill.name == "imagegen"
+    assert route.args == "帮我生成一张小猫的图片"
+    assert route.reason == "inline_slash_skill"
+
+
 def test_semantic_image_request_matches_image_skill_description(tmp_path):
     _write_skill(tmp_path, "imagegen", "Generate or edit raster images.")
 

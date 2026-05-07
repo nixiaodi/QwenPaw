@@ -17,6 +17,7 @@ import { chatApi } from "../../api/modules/chat";
 import { getApiUrl } from "../../api/config";
 import { buildAuthHeaders } from "../../api/authHeaders";
 import { providerApi } from "../../api/modules/provider";
+import { slashApi, type SlashCatalogItem } from "../../api/modules/slash";
 import type { ProviderInfo, ModelInfo } from "../../api/types";
 import ModelSelector from "./ModelSelector";
 import { useTheme } from "../../contexts/ThemeContext";
@@ -80,6 +81,18 @@ interface CommandSuggestion {
   command: string;
   value: string;
   description: string;
+  group?: string;
+  icon?: string;
+}
+
+interface SlashMenuState {
+  open: boolean;
+  keyword: string;
+  slashStart: number;
+  cursor: number;
+  left: number;
+  bottom: number;
+  activeIndex: number;
 }
 
 function messageRequestsHistoryClear(message: unknown): boolean {
@@ -122,13 +135,43 @@ function payloadCompletesResponse(payload: unknown): boolean {
   return record.object === "response" && record.status === "completed";
 }
 
-function renderSuggestionLabel(command: string, description: string) {
+function renderSuggestionLabel(item: CommandSuggestion) {
   return (
     <div className={styles.suggestionLabel}>
-      <span className={styles.suggestionCommand}>{command}</span>
-      <span className={styles.suggestionDescription}>{description}</span>
+      <div className={styles.suggestionMain}>
+        {item.icon && <span className={styles.suggestionIcon}>{item.icon}</span>}
+        <span className={styles.suggestionCommand}>{item.command}</span>
+        {item.group && <span className={styles.suggestionGroup}>{item.group}</span>}
+      </div>
+      {item.description && (
+        <div className={styles.suggestionDescription}>
+          {item.description}
+        </div>
+      )}
     </div>
   );
+}
+
+function suggestionValue(insertText: string): string {
+  return insertText.replace(/^\/+/, "");
+}
+
+function findInlineSlashToken(
+  textarea: HTMLTextAreaElement,
+): Pick<SlashMenuState, "keyword" | "slashStart" | "cursor"> | null {
+  const cursor = textarea.selectionStart ?? 0;
+  if (cursor !== textarea.selectionEnd) return null;
+
+  const beforeCursor = textarea.value.slice(0, cursor);
+  const match = /(^|\s)\/([^\s]*)$/.exec(beforeCursor);
+  if (!match) return null;
+
+  const keyword = match[2].toLowerCase();
+  return {
+    keyword,
+    slashStart: cursor - keyword.length - 1,
+    cursor,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -502,6 +545,24 @@ export default function ChatPage() {
     Map<string, ApprovalMessageData>
   >(new Map());
   const [planEnabled, setPlanEnabled] = useState(false);
+  const [slashCatalog, setSlashCatalog] = useState<SlashCatalogItem[]>([]);
+  const [slashMenu, setSlashMenu] = useState<SlashMenuState>({
+    open: false,
+    keyword: "",
+    slashStart: 0,
+    cursor: 0,
+    left: 0,
+    bottom: 0,
+    activeIndex: 0,
+  });
+  const slashTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const slashMenuRef = useRef<HTMLDivElement | null>(null);
+  const slashItemRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const isChatActiveRef = useRef(false);
+  isChatActiveRef.current =
+    location.pathname === "/" || location.pathname.startsWith("/chat");
+
+  const isChatActive = useCallback(() => isChatActiveRef.current, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -516,11 +577,222 @@ export default function ChatPage() {
     };
   }, [selectedAgent]);
 
-  const isChatActiveRef = useRef(false);
-  isChatActiveRef.current =
-    location.pathname === "/" || location.pathname.startsWith("/chat");
+  const slashSuggestions = useMemo<CommandSuggestion[]>(
+    () =>
+      slashCatalog
+        .filter(
+          (item) =>
+            item.type === "command" ||
+            item.type === "skill" ||
+            item.type.startsWith("mcp_"),
+        )
+        .map((item) => ({
+          command: item.command,
+          value: suggestionValue(item.insertText),
+          description: item.description || item.group,
+          group: item.group,
+          icon: item.icon,
+        })),
+    [slashCatalog],
+  );
 
-  const isChatActive = useCallback(() => isChatActiveRef.current, []);
+  const filteredSlashSuggestions = useMemo(() => {
+    if (!slashMenu.open) return [];
+    if (!slashMenu.keyword) return slashSuggestions;
+    return slashSuggestions.filter((item) => {
+      const haystack = `${item.command} ${item.description} ${item.group ?? ""}`
+        .toLowerCase();
+      return haystack.includes(slashMenu.keyword);
+    });
+  }, [slashMenu.open, slashMenu.keyword, slashSuggestions]);
+
+  useEffect(() => {
+    slashItemRefs.current = slashItemRefs.current.slice(
+      0,
+      filteredSlashSuggestions.length,
+    );
+  }, [filteredSlashSuggestions.length]);
+
+  useEffect(() => {
+    if (!slashMenu.open || filteredSlashSuggestions.length === 0) return;
+    const activeItem = slashItemRefs.current[slashMenu.activeIndex];
+    activeItem?.scrollIntoView({ block: "nearest" });
+  }, [
+    filteredSlashSuggestions.length,
+    slashMenu.activeIndex,
+    slashMenu.open,
+  ]);
+
+  const closeSlashMenu = useCallback(() => {
+    setSlashMenu((current) =>
+      current.open ? { ...current, open: false } : current,
+    );
+  }, []);
+
+  const updateSlashMenuFromTextarea = useCallback(
+    (textarea: HTMLTextAreaElement) => {
+      if (!isChatActive()) return;
+      const token = findInlineSlashToken(textarea);
+      if (!token || slashSuggestions.length === 0) {
+        closeSlashMenu();
+        return;
+      }
+
+      const rect = textarea.getBoundingClientRect();
+      slashTextareaRef.current = textarea;
+      setSlashMenu((current) => {
+        const next = {
+          open: true,
+          keyword: token.keyword,
+          slashStart: token.slashStart,
+          cursor: token.cursor,
+          left: rect.left,
+          bottom: Math.max(window.innerHeight - rect.top + 8, 96),
+          activeIndex: 0,
+        };
+        if (
+          current.open === next.open &&
+          current.keyword === next.keyword &&
+          current.slashStart === next.slashStart &&
+          current.cursor === next.cursor &&
+          current.left === next.left &&
+          current.bottom === next.bottom
+        ) {
+          return current;
+        }
+        return next;
+      });
+    },
+    [closeSlashMenu, isChatActive, slashSuggestions.length],
+  );
+
+  const applySlashSuggestion = useCallback(
+    (item: CommandSuggestion) => {
+      const textarea = slashTextareaRef.current;
+      if (!textarea) return;
+
+      const cursor = textarea.selectionStart ?? slashMenu.cursor;
+      const insertion = `/${item.value}`;
+      const nextValue =
+        textarea.value.slice(0, slashMenu.slashStart) +
+        insertion +
+        textarea.value.slice(cursor);
+      const nextCursor = slashMenu.slashStart + insertion.length;
+      setTextareaValue(textarea, nextValue, nextCursor);
+      textarea.focus();
+      closeSlashMenu();
+    },
+    [closeSlashMenu, slashMenu.cursor, slashMenu.slashStart],
+  );
+
+  useEffect(() => {
+    const isChatSenderTextarea = (
+      target: EventTarget | null,
+    ): target is HTMLTextAreaElement =>
+      target instanceof HTMLTextAreaElement &&
+      target.closest('[class*="sender"]') !== null;
+
+    const scheduleSlashMenuUpdate = (textarea: HTMLTextAreaElement) => {
+      window.requestAnimationFrame(() => {
+        if (document.activeElement === textarea) {
+          updateSlashMenuFromTextarea(textarea);
+        }
+      });
+    };
+
+    const handleInput = (event: Event) => {
+      if (!isChatSenderTextarea(event.target)) return;
+      scheduleSlashMenuUpdate(event.target);
+    };
+
+    const handleClick = (event: MouseEvent) => {
+      if (!isChatSenderTextarea(event.target)) {
+        closeSlashMenu();
+        return;
+      }
+      scheduleSlashMenuUpdate(event.target);
+    };
+
+    const handleKeyUp = (event: KeyboardEvent) => {
+      if (!isChatSenderTextarea(event.target)) return;
+      if (["ArrowUp", "ArrowDown", "Enter", "Tab", "Escape"].includes(event.key)) {
+        return;
+      }
+      scheduleSlashMenuUpdate(event.target);
+    };
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (!slashMenu.open || !isChatSenderTextarea(event.target)) return;
+      if (filteredSlashSuggestions.length === 0) return;
+
+      const claimNavigationKey = () => {
+        event.preventDefault();
+        event.stopPropagation();
+        event.stopImmediatePropagation();
+      };
+
+      if (event.key === "ArrowDown") {
+        claimNavigationKey();
+        setSlashMenu((current) => ({
+          ...current,
+          activeIndex: (current.activeIndex + 1) % filteredSlashSuggestions.length,
+        }));
+      } else if (event.key === "ArrowUp") {
+        claimNavigationKey();
+        setSlashMenu((current) => ({
+          ...current,
+          activeIndex:
+            (current.activeIndex - 1 + filteredSlashSuggestions.length) %
+            filteredSlashSuggestions.length,
+        }));
+      } else if (event.key === "Enter" || event.key === "Tab") {
+        claimNavigationKey();
+        applySlashSuggestion(
+          filteredSlashSuggestions[
+            Math.min(slashMenu.activeIndex, filteredSlashSuggestions.length - 1)
+          ],
+        );
+      } else if (event.key === "Escape") {
+        claimNavigationKey();
+        closeSlashMenu();
+      }
+    };
+
+    document.addEventListener("input", handleInput);
+    document.addEventListener("click", handleClick);
+    document.addEventListener("keyup", handleKeyUp);
+    document.addEventListener("keydown", handleKeyDown, true);
+
+    return () => {
+      document.removeEventListener("input", handleInput);
+      document.removeEventListener("click", handleClick);
+      document.removeEventListener("keyup", handleKeyUp);
+      document.removeEventListener("keydown", handleKeyDown, true);
+    };
+  }, [
+    applySlashSuggestion,
+    closeSlashMenu,
+    filteredSlashSuggestions,
+    slashMenu.activeIndex,
+    slashMenu.open,
+    updateSlashMenuFromTextarea,
+  ]);
+
+  useEffect(() => {
+    let cancelled = false;
+    slashApi
+      .catalog(selectedAgent)
+      .then((items) => {
+        if (!cancelled) setSlashCatalog(items);
+      })
+      .catch((error) => {
+        console.warn("[Slash] Failed to load slash catalog:", error);
+        if (!cancelled) setSlashCatalog([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedAgent]);
 
   // Consume approvals from Context and filter by current session
   useEffect(() => {
@@ -961,35 +1233,6 @@ export default function ChatPage() {
 
   const options = useMemo(() => {
     const i18nConfig = getDefaultConfig(t);
-    const commandSuggestions: CommandSuggestion[] = [
-      {
-        command: "/clear",
-        value: "clear",
-        description: t("chat.commands.clear.description"),
-      },
-      {
-        command: "/compact",
-        value: "compact",
-        description: t("chat.commands.compact.description"),
-      },
-      {
-        command: "/mission",
-        value: "mission",
-        description: t("chat.commands.mission.description"),
-      },
-      {
-        command: "/skills",
-        value: "skills",
-        description: t("chat.commands.skills.description"),
-      },
-    ];
-    if (planEnabled) {
-      commandSuggestions.push({
-        command: "/plan",
-        value: "plan ",
-        description: t("chat.commands.plan.description"),
-      });
-    }
 
     const handleBeforeSubmit = async () => {
       if (isComposingRef.current) return false;
@@ -1045,10 +1288,7 @@ export default function ChatPage() {
           customRequest: handleFileUpload,
         },
         placeholder: t("chat.inputPlaceholder"),
-        suggestions: commandSuggestions.map((item) => ({
-          label: renderSuggestionLabel(item.command, item.description),
-          value: item.value,
-        })),
+        suggestions: [],
       },
       session: {
         multiple: true,
@@ -1159,6 +1399,40 @@ export default function ChatPage() {
           options={options}
         />
       </div>
+
+      {slashMenu.open && filteredSlashSuggestions.length > 0 && (
+        <div
+          ref={slashMenuRef}
+          className={styles.inlineSlashMenu}
+          style={{
+            left: slashMenu.left,
+            bottom: slashMenu.bottom,
+          }}
+          onMouseDown={(event) => event.preventDefault()}
+        >
+          {filteredSlashSuggestions.map((item, index) => (
+            <button
+              ref={(element) => {
+                slashItemRefs.current[index] = element;
+              }}
+              key={`${item.command}:${item.value}`}
+              type="button"
+              className={`${styles.inlineSlashItem} ${
+                index === slashMenu.activeIndex ? styles.inlineSlashItemActive : ""
+              }`}
+              onMouseEnter={() =>
+                setSlashMenu((current) => ({
+                  ...current,
+                  activeIndex: index,
+                }))
+              }
+              onClick={() => applySlashSuggestion(item)}
+            >
+              {renderSuggestionLabel(item)}
+            </button>
+          ))}
+        </div>
+      )}
 
       {/* Render approval cards as overlays */}
       {Array.from(approvalRequests.values()).map((request) => (

@@ -56,9 +56,10 @@ class SkillRoute:
 
 _WORD_RE = re.compile(r"[a-zA-Z0-9_-]+")
 _EXPLICIT_RE = re.compile(
-    r"(?:调用|使用|加载|启用|invoke|use|load)\s+([a-zA-Z0-9_-]+)",
+    r"(?:调用|使用|加载|启用|用|通过|invoke|use|load)\s+/?([a-zA-Z0-9_.-]+)",
     re.IGNORECASE,
 )
+_INLINE_SLASH_SKILL_RE = re.compile(r"(^|\s)/([a-zA-Z0-9_.-]+)(?=\s|$)")
 
 _IMAGE_TERMS = {
     "image",
@@ -285,6 +286,17 @@ class SkillIntentRouter:
                 candidates=((skill.name, 100),),
             )
 
+        inline_slash = self._find_inline_slash_skill(text)
+        if inline_slash is not None:
+            skill, args = inline_slash
+            return SkillRoute(
+                kind="invoke",
+                skill=skill,
+                args=args,
+                reason="inline_slash_skill",
+                candidates=((skill.name, 98),),
+            )
+
         explicit = _EXPLICIT_RE.search(text)
         if explicit:
             skill = self._find_skill(explicit.group(1))
@@ -312,6 +324,27 @@ class SkillIntentRouter:
                 )
 
         return self._route_semantic(text)
+
+    def _find_inline_slash_skill(
+        self,
+        text: str,
+    ) -> tuple[SkillMeta, str] | None:
+        for match in _INLINE_SLASH_SKILL_RE.finditer(text):
+            command = match.group(2)
+            if _normalize_name(command) in {"skill", "skills"}:
+                continue
+            skill = self._find_skill(command)
+            if skill is None:
+                continue
+            args = text[match.end() :].strip()
+            if not args:
+                args = (
+                    text[: match.start()].strip()
+                    + " "
+                    + text[match.end() :].strip()
+                ).strip()
+            return skill, args or text
+        return None
 
     def _route_skills_command(self, args: str) -> SkillRoute:
         parts = args.split(None, 1)

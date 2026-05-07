@@ -40,6 +40,11 @@ from ...agents.skill_runtime import (
     render_skill_list,
     route_to_prompt,
 )
+from ...agents.slash_runtime import (
+    SlashRoute,
+    resolve_slash_route,
+    route_to_prompt as slash_route_to_prompt,
+)
 from ...config.config import load_agent_config
 from ...constant import WORKING_DIR
 from ...plan.intent_router import PlanIntentRouter
@@ -242,6 +247,90 @@ class AgentRunner(Runner):
                     route.candidates,
                 )
         return None
+
+    @staticmethod
+    def _maybe_inject_slash_route(
+        query: str | None,
+        msgs: list,
+        route: SlashRoute | None,
+    ) -> Msg | None:
+        """Apply explicit `/tool` or `/mcp` routing."""
+        if route is None:
+            return None
+        if route.error:
+            return Msg(
+                name="Friday",
+                role="assistant",
+                content=[TextBlock(type="text", text=route.error)],
+            )
+        if msgs:
+            prompt = slash_route_to_prompt(route)
+            AgentRunner._rewrite_last_message_text(
+                msgs,
+                prompt + (route.args or query or ""),
+            )
+            logger.info(
+                "Slash invocation routed: kind=%s tool=%s client=%s "
+                "mcp_tool=%s",
+                route.kind,
+                route.tool_name,
+                route.client_key,
+                route.mcp_tool_name,
+            )
+        return None
+
+    async def _validate_slash_route(
+        self,
+        route: SlashRoute | None,
+    ) -> SlashRoute | None:
+        """Best-effort validation for explicit MCP tool slash routes."""
+        if route is None or route.error or route.kind != "mcp_tool":
+            return route
+        if self._mcp_manager is None:
+            return SlashRoute(
+                kind=route.kind,
+                client_key=route.client_key,
+                mcp_tool_name=route.mcp_tool_name,
+                args=route.args,
+                error="MCP 管理器尚未就绪，请稍后重试。",
+            )
+        client = await self._mcp_manager.get_client(route.client_key)
+        if client is None or not getattr(client, "is_connected", False):
+            return SlashRoute(
+                kind=route.kind,
+                client_key=route.client_key,
+                mcp_tool_name=route.mcp_tool_name,
+                args=route.args,
+                error=f"MCP client `{route.client_key}` 尚未连接。",
+            )
+        try:
+            tools = await client.list_tools()
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.warning(
+                "Slash MCP tool validation failed: client=%s error=%s",
+                route.client_key,
+                exc,
+            )
+            return SlashRoute(
+                kind=route.kind,
+                client_key=route.client_key,
+                mcp_tool_name=route.mcp_tool_name,
+                args=route.args,
+                error=f"无法查询 MCP client `{route.client_key}` 的工具列表。",
+            )
+        available = {getattr(tool, "name", "") for tool in tools}
+        if route.mcp_tool_name not in available:
+            return SlashRoute(
+                kind=route.kind,
+                client_key=route.client_key,
+                mcp_tool_name=route.mcp_tool_name,
+                args=route.args,
+                error=(
+                    f"MCP tool `{route.client_key}.{route.mcp_tool_name}` "
+                    "不存在或当前不可用。"
+                ),
+            )
+        return route
 
     async def _maybe_resolve_skill_clarification(
         self,
@@ -568,11 +657,29 @@ class AgentRunner(Runner):
                     refresher + original,
                 )
 
+            slash_route: SlashRoute | None = None
+            if mission_info is None:
+                try:
+                    slash_route = resolve_slash_route(query, agent_config)
+                    slash_route = await self._validate_slash_route(
+                        slash_route,
+                    )
+                    slash_response = self._maybe_inject_slash_route(
+                        query,
+                        msgs,
+                        slash_route,
+                    )
+                    if slash_response is not None:
+                        yield slash_response, True
+                        return
+                except Exception:
+                    logger.warning("Slash routing failed", exc_info=True)
+
             # Skill routing: explicit slash/name, bare skill name, or
             # high-confidence description intent match.
             skill_route: SkillRoute | None = None
             skill_response: Msg | None = None
-            if mission_info is None:
+            if mission_info is None and slash_route is None:
                 try:
                     enabled_skills = discover_enabled_skills(_ws, channel)
                     skill_route = SkillIntentRouter(enabled_skills).route(
@@ -662,6 +769,7 @@ class AgentRunner(Runner):
                             )
                     elif (
                         mission_info is None
+                        and slash_route is None
                         and (
                             skill_route is None
                             or skill_route.reason == "semantic_description"

@@ -191,7 +191,11 @@ export function toDisplayUrl(url: string | undefined): string {
 /** Set textarea value and trigger input event for React state sync.
  * Uses native value setter to bypass React's internal value tracker.
  */
-export function setTextareaValue(textarea: HTMLTextAreaElement, value: string) {
+export function setTextareaValue(
+  textarea: HTMLTextAreaElement,
+  value: string,
+  cursorPosition?: number,
+) {
   const nativeValueSetter = Object.getOwnPropertyDescriptor(
     HTMLTextAreaElement.prototype,
     "value",
@@ -201,7 +205,8 @@ export function setTextareaValue(textarea: HTMLTextAreaElement, value: string) {
   } else {
     textarea.value = value;
   }
-  textarea.selectionStart = textarea.selectionEnd = value.length;
+  const nextCursor = cursorPosition ?? value.length;
+  textarea.selectionStart = textarea.selectionEnd = nextCursor;
   const event = new Event("input", { bubbles: true });
   textarea.dispatchEvent(event);
 }

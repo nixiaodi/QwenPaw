@@ -48,6 +48,7 @@ from ...agents.slash_runtime import (
 from ...config.config import load_agent_config
 from ...constant import WORKING_DIR
 from ...plan.intent_router import PlanIntentRouter
+from ...runtime_status.broadcast import broadcast_runtime_status
 
 if TYPE_CHECKING:
     from ...agents.memory import BaseMemoryManager
@@ -157,6 +158,28 @@ class AgentRunner(Runner):
             workspace: Workspace instance
         """
         self._workspace = workspace
+
+    def _emit_runtime_status(
+        self,
+        *,
+        session_id: str,
+        root_session_id: str | None = None,
+        chat_id: str | None = None,
+        stage: str,
+        status: str = "running",
+        message: str = "",
+        detail: dict[str, Any] | None = None,
+    ) -> None:
+        broadcast_runtime_status(
+            self.agent_id,
+            session_id=session_id,
+            root_session_id=root_session_id or session_id,
+            chat_id=chat_id,
+            stage=stage,
+            status=status,
+            message=message,
+            detail=detail,
+        )
 
     @staticmethod
     def _parse_skill_query(
@@ -598,6 +621,13 @@ class AgentRunner(Runner):
                     session_preview,
                 )
 
+            self._emit_runtime_status(
+                session_id=session_id,
+                root_session_id=base_request_context["root_session_id"],
+                stage="agent_starting",
+                message="智能体正在启动…",
+            )
+
             # Mission Mode: /mission
             _ws = self.workspace_dir or WORKING_DIR
             mission_info: dict | None = None
@@ -914,6 +944,7 @@ class AgentRunner(Runner):
                     channel,
                     name=name,
                 )
+                base_request_context["chat_id"] = chat.id
                 logger.debug(f"Runner: Got chat: {chat.id}")
             else:
                 logger.warning(
@@ -968,7 +999,16 @@ class AgentRunner(Runner):
             # in the session state.
             agent.rebuild_sys_prompt()
 
+            self._emit_runtime_status(
+                session_id=session_id,
+                root_session_id=base_request_context["root_session_id"],
+                chat_id=(chat.id if chat is not None else None),
+                stage="waiting_model_first_event",
+                message="正在等待模型响应…",
+            )
+
             # --- Execution: Mission Mode (phased) or standard -----
+            seen_first_event = False
             if mission_info is not None:
                 from ...agents.mission.mission_runner import (
                     run_mission_phase1,
@@ -990,6 +1030,17 @@ class AgentRunner(Runner):
                         max_iterations=max_iters,
                         agent_id=self.agent_id,
                     ):
+                        if not seen_first_event:
+                            seen_first_event = True
+                            self._emit_runtime_status(
+                                session_id=session_id,
+                                root_session_id=base_request_context[
+                                    "root_session_id"
+                                ],
+                                chat_id=(chat.id if chat is not None else None),
+                                stage="model_streaming",
+                                message="模型已开始响应。",
+                            )
                         yield msg, last
                 else:
                     async for msg, last in run_mission_phase2(
@@ -999,13 +1050,43 @@ class AgentRunner(Runner):
                         max_iterations=max_iters,
                         agent_id=self.agent_id,
                     ):
+                        if not seen_first_event:
+                            seen_first_event = True
+                            self._emit_runtime_status(
+                                session_id=session_id,
+                                root_session_id=base_request_context[
+                                    "root_session_id"
+                                ],
+                                chat_id=(chat.id if chat is not None else None),
+                                stage="model_streaming",
+                                message="模型已开始响应。",
+                            )
                         yield msg, last
             else:
                 async for msg, last in _stream_printing_messages_interruptible(
                     agents=[agent],
                     coroutine_task=agent(msgs),
                 ):
+                    if not seen_first_event:
+                        seen_first_event = True
+                        self._emit_runtime_status(
+                            session_id=session_id,
+                            root_session_id=base_request_context[
+                                "root_session_id"
+                            ],
+                            chat_id=(chat.id if chat is not None else None),
+                            stage="model_streaming",
+                            message="模型已开始响应。",
+                        )
                     yield msg, last
+            self._emit_runtime_status(
+                session_id=session_id,
+                root_session_id=base_request_context["root_session_id"],
+                chat_id=(chat.id if chat is not None else None),
+                stage="completed",
+                status="completed",
+                message="任务已完成。",
+            )
 
         except asyncio.CancelledError as exc:
             logger.info(f"query_handler: {session_id} cancelled!")
@@ -1034,6 +1115,17 @@ class AgentRunner(Runner):
 
             if agent is not None:
                 await agent.interrupt()
+            self._emit_runtime_status(
+                session_id=session_id,
+                root_session_id=base_request_context.get(
+                    "root_session_id",
+                    session_id,
+                ),
+                chat_id=(chat.id if chat is not None else None),
+                stage="cancelled",
+                status="failed",
+                message="任务已取消。",
+            )
             raise AgentException("Task has been cancelled!") from exc
         except AppBaseException:
             raise
@@ -1054,6 +1146,17 @@ class AgentRunner(Runner):
                 f"\n(Details:  {debug_dump_path})" if debug_dump_path else ""
             )
             logger.exception(f"Error in query handler: {converted}{path_hint}")
+            self._emit_runtime_status(
+                session_id=session_id,
+                root_session_id=base_request_context.get(
+                    "root_session_id",
+                    session_id,
+                ),
+                chat_id=(chat.id if chat is not None else None),
+                stage="failed",
+                status="failed",
+                message=str(converted)[:180],
+            )
             if debug_dump_path:
                 setattr(converted, "debug_dump_path", debug_dump_path)
                 if hasattr(converted, "add_note"):

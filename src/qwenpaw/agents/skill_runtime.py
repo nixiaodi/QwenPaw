@@ -40,6 +40,8 @@ class SkillMeta:
     description: str
     skill_dir: Path
     skill_md_path: Path
+    source: str = "workspace"
+    shadowed_by: str | None = None
 
 
 @dataclass(frozen=True)
@@ -52,6 +54,7 @@ class SkillRoute:
     reason: str = ""
     candidates: tuple[tuple[str, int], ...] = ()
     skills: tuple[SkillMeta, ...] = ()
+    diagnostics: tuple[str, ...] = ()
 
 
 _WORD_RE = re.compile(r"[a-zA-Z0-9_-]+")
@@ -61,36 +64,174 @@ _EXPLICIT_RE = re.compile(
 )
 _INLINE_SLASH_SKILL_RE = re.compile(r"(^|\s)/([a-zA-Z0-9_.-]+)(?=\s|$)")
 
-_IMAGE_TERMS = {
-    "image",
-    "images",
-    "picture",
-    "pictures",
-    "photo",
-    "photos",
-    "poster",
-    "illustration",
-    "illustrations",
-    "art",
-    "bitmap",
-    "visual",
-    "mockup",
-    "generate image",
-    "edit image",
-    "图片",
-    "图像",
-    "照片",
-    "海报",
-    "插画",
-    "画图",
-    "绘图",
-    "生图",
-    "生成图",
-    "设计图",
-    "视觉",
+_CAPABILITY_SPECS: dict[str, dict[str, set[str]]] = {
+    "image": {
+        "skill": {
+            "image",
+            "images",
+            "picture",
+            "photo",
+            "poster",
+            "illustration",
+            "bitmap",
+            "visual",
+            "mockup",
+            "imagegen",
+            "nano-banana",
+            "图片",
+            "图像",
+            "照片",
+            "海报",
+            "插画",
+        },
+        "query": {
+            "image",
+            "images",
+            "picture",
+            "photo",
+            "poster",
+            "illustration",
+            "图片",
+            "图像",
+            "照片",
+            "海报",
+            "插画",
+            "画图",
+            "绘图",
+            "生图",
+            "生成图",
+            "设计图",
+            ".png",
+            ".jpg",
+            ".jpeg",
+            ".webp",
+        },
+    },
+    "document": {
+        "skill": {
+            "docx",
+            "word",
+            "document",
+            "documents",
+            "memo",
+            "letter",
+            "文档",
+            "报告",
+            "word文档",
+        },
+        "query": {
+            "docx",
+            "word",
+            "document",
+            "documents",
+            "memo",
+            "letter",
+            "report",
+            "文档",
+            "word文档",
+            "报告",
+            ".docx",
+        },
+    },
+    "spreadsheet": {
+        "skill": {
+            "xlsx",
+            "xls",
+            "excel",
+            "spreadsheet",
+            "csv",
+            "table",
+            "表格",
+            "电子表格",
+        },
+        "query": {
+            "xlsx",
+            "xls",
+            "excel",
+            "spreadsheet",
+            "csv",
+            "表格",
+            "电子表格",
+            ".xlsx",
+            ".xls",
+            ".csv",
+        },
+    },
+    "presentation": {
+        "skill": {
+            "ppt",
+            "pptx",
+            "powerpoint",
+            "presentation",
+            "slides",
+            "deck",
+            "幻灯片",
+            "演示",
+        },
+        "query": {
+            "ppt",
+            "pptx",
+            "powerpoint",
+            "presentation",
+            "slides",
+            "deck",
+            "report",
+            "幻灯片",
+            "演示",
+            "报告",
+            ".pptx",
+        },
+    },
+    "pdf": {
+        "skill": {"pdf", "表单", "ocr"},
+        "query": {"pdf", ".pdf", "表单", "ocr", "report", "报告"},
+    },
+    "browser": {
+        "skill": {
+            "browser",
+            "playwright",
+            "web",
+            "website",
+            "screenshot",
+            "网页",
+            "浏览器",
+        },
+        "query": {
+            "browser",
+            "playwright",
+            "website",
+            "webpage",
+            "网页",
+            "浏览器",
+            "截图",
+            "http://",
+            "https://",
+        },
+    },
+    "video": {
+        "skill": {"video", "youtube", "bilibili", "douyin", "视频", "抖音"},
+        "query": {"video", "youtube", "bilibili", "douyin", "视频", "抖音"},
+    },
 }
 
-_INTENT_GROUPS = (_IMAGE_TERMS,)
+_DELIVERABLE_TERMS = {
+    "report",
+    "document",
+    "presentation",
+    "slides",
+    "deck",
+    "spreadsheet",
+    "image",
+    "poster",
+    "pdf",
+    "报告",
+    "文档",
+    "ppt",
+    "幻灯片",
+    "表格",
+    "图片",
+    "海报",
+}
 
 
 def _normalize_name(value: str) -> str:
@@ -123,6 +264,7 @@ def discover_enabled_skills(
     skill_names = resolve_effective_skills(workspace, channel)
     skills_dir = get_workspace_skills_dir(workspace)
     result: list[SkillMeta] = []
+    seen_aliases: dict[str, str] = {}
     for skill_name in skill_names:
         skill_dir = skills_dir / skill_name
         skill_md_path = skill_dir / "SKILL.md"
@@ -137,16 +279,40 @@ def discover_enabled_skills(
                 exc,
             )
             continue
-        result.append(
-            SkillMeta(
-                name=skill_name,
-                display_name=str(post.get("name") or skill_name),
-                description=str(post.get("description") or ""),
-                skill_dir=skill_dir,
-                skill_md_path=skill_md_path,
-            ),
+        meta = SkillMeta(
+            name=skill_name,
+            display_name=str(post.get("name") or skill_name),
+            description=str(post.get("description") or ""),
+            skill_dir=skill_dir,
+            skill_md_path=skill_md_path,
         )
-    return result
+        aliases = _skill_aliases(meta)
+        shadowed_by = next(
+            (seen_aliases[alias] for alias in aliases if alias in seen_aliases),
+            None,
+        )
+        if shadowed_by is not None:
+            logger.info(
+                "Skill inventory: %s shadowed by %s",
+                skill_name,
+                shadowed_by,
+            )
+            result.append(
+                SkillMeta(
+                    name=meta.name,
+                    display_name=meta.display_name,
+                    description=meta.description,
+                    skill_dir=meta.skill_dir,
+                    skill_md_path=meta.skill_md_path,
+                    source=meta.source,
+                    shadowed_by=shadowed_by,
+                ),
+            )
+            continue
+        for alias in aliases:
+            seen_aliases.setdefault(alias, skill_name)
+        result.append(meta)
+    return [skill for skill in result if skill.shadowed_by is None]
 
 
 def resolve_enabled_skill(
@@ -170,6 +336,8 @@ def render_skill_list(skills: list[SkillMeta]) -> str:
         return "No enabled skills are available for this channel."
     lines = ["**Enabled skills**"]
     for skill in sorted(skills, key=lambda item: item.name.lower()):
+        if skill.shadowed_by is not None:
+            continue
         desc = f" - {skill.description}" if skill.description else ""
         lines.append(f"- `{skill.name}`{desc}")
     return "\n".join(lines)
@@ -208,6 +376,22 @@ def route_to_prompt(route: SkillRoute) -> str:
     )
 
 
+def _render_skill_runtime_prefix(meta: SkillMeta) -> str:
+    skill_dir = str(meta.skill_dir)
+    return (
+        "[QwenPaw skill runtime]\n"
+        f"- This skill is installed at: `{skill_dir}`.\n"
+        "- Treat relative paths inside SKILL.md as relative to that skill "
+        "directory, not the workspace root.\n"
+        "- When running a bundled script from this skill, set the command "
+        "working directory to the skill directory or prefix the command with "
+        f"`cd \"{skill_dir}\" && ...`.\n"
+        "- Save user-facing outputs in the workspace unless SKILL.md says "
+        "otherwise.\n"
+        "---\n\n"
+    )
+
+
 def _split_slash_invocation(query: str) -> tuple[str, str] | None:
     stripped = query.strip()
     if not stripped.startswith("/"):
@@ -231,30 +415,105 @@ def _first_token(text: str) -> str:
     return match.group(0) if match else ""
 
 
-def _contains_any(text: str, terms: set[str]) -> bool:
+def _text_has_term(text: str, term: str) -> bool:
+    if not term:
+        return False
+    if re.fullmatch(r"[a-z0-9_.-]+", term):
+        pattern = rf"(?<![a-z0-9_.-]){re.escape(term)}(?![a-z0-9_.-])"
+        return re.search(pattern, text) is not None
+    return term in text
+
+
+def _matched_terms(text: str, terms: set[str]) -> set[str]:
     lowered = text.lower()
-    return any(term in lowered for term in terms)
+    return {term for term in terms if _text_has_term(lowered, term.lower())}
 
 
-def _score_semantic(query: str, skill: SkillMeta) -> int:
-    haystack = f"{skill.name} {skill.display_name} {skill.description}".lower()
+def _skill_domains(skill: SkillMeta) -> tuple[set[str], set[str]]:
+    name_text = f"{skill.name} {skill.display_name} {skill.skill_dir.name}".lower()
+    desc_text = skill.description.lower()
+    primary: set[str] = set()
+    secondary: set[str] = set()
+    for domain, spec in _CAPABILITY_SPECS.items():
+        skill_terms = spec["skill"]
+        if _matched_terms(name_text, skill_terms):
+            primary.add(domain)
+        elif _matched_terms(desc_text, skill_terms):
+            secondary.add(domain)
+
+    # A description may mention an adjacent capability (for example
+    # "replace images in Word documents"). Keep that as secondary unless the
+    # skill name/frontmatter name itself declares the capability.
+    if not primary and secondary:
+        primary.add(next(iter(sorted(secondary))))
+    return primary, secondary - primary
+
+
+def _query_domains(query: str) -> set[str]:
     query_lower = query.lower()
-    score = 0
+    domains: set[str] = set()
+    for domain, spec in _CAPABILITY_SPECS.items():
+        if _matched_terms(query_lower, spec["query"]):
+            domains.add(domain)
+    return domains
 
-    query_terms = {
+
+def _query_terms(query: str) -> set[str]:
+    return {
         term
-        for term in re.split(r"[\s,，。.!?！？、:：;；()（）]+", query_lower)
+        for term in re.split(r"[\s,，。.!?！？、:：;；()（）\[\]【】]+", query.lower())
         if len(term) >= 2
     }
-    for term in query_terms:
+
+
+def _score_semantic(query: str, skill: SkillMeta) -> tuple[int, str]:
+    haystack = f"{skill.name} {skill.display_name} {skill.description}".lower()
+    query_lower = query.lower()
+    primary_domains, secondary_domains = _skill_domains(skill)
+    requested_domains = _query_domains(query)
+    score = 0
+    reasons: list[str] = []
+
+    primary_matches = primary_domains & requested_domains
+    secondary_matches = secondary_domains & requested_domains
+    if primary_matches:
+        added = 12 * len(primary_matches)
+        score += added
+        reasons.append(f"primary={sorted(primary_matches)}(+{added})")
+    if secondary_matches and primary_matches:
+        added = 3 * len(secondary_matches)
+        score += added
+        reasons.append(f"secondary={sorted(secondary_matches)}(+{added})")
+
+    # Weak lexical overlap. This helps locally named skills, but cannot by
+    # itself make a skill high confidence.
+    weak_hits = []
+    for term in _query_terms(query_lower):
+        if term in _DELIVERABLE_TERMS:
+            continue
         if term and term in haystack:
-            score += 2
+            weak_hits.append(term)
+    if weak_hits:
+        added = min(4, len(weak_hits))
+        score += added
+        reasons.append(f"weak={weak_hits[:5]}(+{added})")
 
-    for group in _INTENT_GROUPS:
-        if _contains_any(query_lower, group) and _contains_any(haystack, group):
-            score += 8
+    # Exact capability name in the query is useful for natural language
+    # requests like "用 pdf 合并文件", while explicit skill names are handled
+    # earlier and never reach semantic scoring.
+    aliases = _skill_aliases(skill)
+    if any(_text_has_term(query_lower, alias) for alias in aliases):
+        score += 8
+        reasons.append("alias(+8)")
 
-    return score
+    if score and not primary_matches and requested_domains:
+        # Avoid accidental matches from scoped secondary mentions when the
+        # request clearly belongs to another primary domain.
+        score = min(score, 5)
+        reasons.append("capped_no_primary")
+
+    reason = ",".join(reasons) or "no_match"
+    return score, reason
 
 
 class SkillIntentRouter:
@@ -398,15 +657,28 @@ class SkillIntentRouter:
         return None
 
     def _route_semantic(self, text: str) -> SkillRoute | None:
-        scored = [
-            (skill, _score_semantic(text, skill)) for skill in self._skills
-        ]
-        scored = [(skill, score) for skill, score in scored if score > 0]
+        scored = []
+        diagnostics = []
+        for skill in self._skills:
+            score, reason = _score_semantic(text, skill)
+            scored.append((skill, score, reason))
+            if score > 0:
+                primary, secondary = _skill_domains(skill)
+                diagnostics.append(
+                    f"{skill.name}: score={score} reason={reason} "
+                    f"primary={sorted(primary)} "
+                    f"secondary={sorted(secondary)}",
+                )
+        scored = [(skill, score) for skill, score, _ in scored if score > 0]
         scored.sort(key=lambda item: (-item[1], item[0].name.lower()))
         if not scored:
             logger.info("Skill router: no semantic candidates")
             return None
         candidates = tuple((skill.name, score) for skill, score in scored[:3])
+        logger.info(
+            "Skill router semantic diagnostics: %s",
+            "; ".join(diagnostics),
+        )
         best, best_score = scored[0]
         second_score = scored[1][1] if len(scored) > 1 else 0
         if best_score < 8:
@@ -430,6 +702,7 @@ class SkillIntentRouter:
                     for skill, score in scored[:3]
                     if best_score - score <= 2
                 ),
+                diagnostics=tuple(diagnostics),
             )
         return SkillRoute(
             kind="invoke",
@@ -437,6 +710,7 @@ class SkillIntentRouter:
             args=text,
             reason="semantic_description",
             candidates=candidates,
+            diagnostics=tuple(diagnostics),
         )
 
 
@@ -467,13 +741,19 @@ async def load_skill(skill: str, args: str | None = None) -> ToolResponse:
             ],
         )
     raw, post = _read_skill_post(meta.skill_dir)
+    runtime_prefix = _render_skill_runtime_prefix(meta)
     payload = {
         "skill": meta.name,
         "name": str(post.get("name") or meta.display_name),
         "description": str(post.get("description") or ""),
         "path": str(meta.skill_md_path),
+        "skill_dir": str(meta.skill_dir),
+        "runtime_note": (
+            "Relative paths in SKILL.md are resolved from skill_dir. "
+            "Run bundled scripts from skill_dir, not the workspace root."
+        ),
         "args": args or "",
-        "prompt": post.content,
+        "prompt": runtime_prefix + post.content,
         "raw": raw,
     }
     return ToolResponse(

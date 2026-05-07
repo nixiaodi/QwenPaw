@@ -1,5 +1,6 @@
 import React from "react";
 import ChatPlanPanel from "../ChatPlanPanel";
+import RuntimeStatusPanel from "../RuntimeStatusPanel";
 import UserInputPanel from "../UserInputPanel";
 import { usePendingUserInput } from "../UserInputPanel/usePendingUserInput";
 
@@ -16,7 +17,12 @@ const TaskInteractionPanel: React.FC<TaskInteractionPanelProps> = ({
     return <UserInputPanel request={request} onResolved={refresh} />;
   }
 
-  return <ChatPlanPanel enabled={planEnabled} />;
+  return (
+    <>
+      <RuntimeStatusPanel enabled />
+      <ChatPlanPanel enabled={planEnabled} />
+    </>
+  );
 };
 
 export default TaskInteractionPanel;

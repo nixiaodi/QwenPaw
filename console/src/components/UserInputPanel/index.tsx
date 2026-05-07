@@ -21,11 +21,7 @@ type AnswerValue = {
 
 function firstDefault(question: UserInputQuestion): AnswerValue {
   const recommended = question.options.find((item) => item.recommended);
-  const selected =
-    question.default_value ||
-    recommended?.value ||
-    question.options[0]?.value ||
-    "";
+  const selected = question.default_value || recommended?.value || "";
   return { selected };
 }
 

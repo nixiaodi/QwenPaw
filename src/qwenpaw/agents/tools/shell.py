@@ -18,9 +18,11 @@ from agentscope.tool import ToolResponse
 
 from ...constant import WORKING_DIR
 from ...config.context import (
+    get_current_request_context,
     get_current_shell_command_timeout,
     get_current_workspace_dir,
 )
+from ...runtime_status.broadcast import broadcast_runtime_status
 
 
 def _kill_process_tree_win32(pid: int) -> None:
@@ -136,6 +138,44 @@ def _collapse_embedded_newlines(cmd: str) -> str:
         # collapse all to ensure the command executes at all.
         return cmd.replace("\r\n", " ").replace("\n", " ")
     return _collapse_newlines_outside_quotes(cmd)
+
+
+def _summarize_command(cmd: str, limit: int = 180) -> str:
+    collapsed = " ".join((cmd or "").split())
+    if len(collapsed) <= limit:
+        return collapsed
+    return collapsed[: limit - 1] + "…"
+
+
+def _broadcast_shell_status(
+    *,
+    stage: str,
+    status: str,
+    message: str,
+    cmd: str,
+    timeout: float,
+    working_dir: Path,
+) -> None:
+    ctx = get_current_request_context() or {}
+    session_id = ctx.get("session_id") or ""
+    agent_id = ctx.get("agent_id") or "default"
+    if not session_id:
+        return
+    broadcast_runtime_status(
+        agent_id,
+        session_id=session_id,
+        root_session_id=ctx.get("root_session_id") or session_id,
+        chat_id=ctx.get("chat_id"),
+        stage=stage,
+        status=status,
+        message=message,
+        detail={
+            "tool": "execute_shell_command",
+            "timeout": timeout,
+            "cwd": str(working_dir),
+            "command": _summarize_command(cmd),
+        },
+    )
 
 
 def _sanitize_win_cmd(cmd: str) -> str:
@@ -343,6 +383,14 @@ async def execute_shell_command(
         env["PATH"] = python_bin_dir
 
     try:
+        _broadcast_shell_status(
+            stage="tool_running",
+            status="running",
+            message="正在执行 shell 命令…",
+            cmd=cmd,
+            timeout=timeout,
+            working_dir=Path(working_dir),
+        )
         if sys.platform == "win32":
             # Windows: use thread pool to avoid asyncio subprocess limitations
             returncode, stdout_str, stderr_str = await asyncio.to_thread(
@@ -419,6 +467,14 @@ async def execute_shell_command(
                     stderr_str = stderr_suffix
 
         if returncode == 0:
+            _broadcast_shell_status(
+                stage="tool_completed",
+                status="running",
+                message="Shell 命令已完成，等待模型继续处理。",
+                cmd=cmd,
+                timeout=timeout,
+                working_dir=Path(working_dir),
+            )
             if stdout_str:
                 response_text = stdout_str
             else:
@@ -426,6 +482,22 @@ async def execute_shell_command(
             if stderr_str:
                 response_text += f"\n[stderr]\n{stderr_str}"
         else:
+            _broadcast_shell_status(
+                stage=(
+                    "tool_timeout"
+                    if "timeout" in (stderr_str or "").lower()
+                    else "tool_failed"
+                ),
+                status="failed",
+                message=(
+                    "Shell 命令执行超时。"
+                    if "timeout" in (stderr_str or "").lower()
+                    else "Shell 命令执行失败。"
+                ),
+                cmd=cmd,
+                timeout=timeout,
+                working_dir=Path(working_dir),
+            )
             response_parts = [f"Command failed with exit code {returncode}."]
             if stdout_str:
                 response_parts.append(f"\n[stdout]\n{stdout_str}")
@@ -443,6 +515,14 @@ async def execute_shell_command(
         )
 
     except Exception as e:
+        _broadcast_shell_status(
+            stage="tool_failed",
+            status="failed",
+            message="Shell 命令执行异常。",
+            cmd=cmd,
+            timeout=timeout,
+            working_dir=Path(working_dir),
+        )
         return ToolResponse(
             content=[
                 TextBlock(

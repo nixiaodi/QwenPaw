@@ -3,6 +3,9 @@ import { request } from "../request";
 export interface PushMessage {
   id: string;
   text: string;
+  session_id?: string | null;
+  root_session_id?: string | null;
+  chat_id?: string | null;
 }
 
 export interface PendingApproval {

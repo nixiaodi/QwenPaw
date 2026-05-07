@@ -121,11 +121,16 @@ def test_semantic_image_request_matches_image_skill_description(tmp_path):
     assert route.reason == "semantic_description"
 
 
-def test_semantic_tie_returns_clarify_route(tmp_path):
+def test_image_semantic_does_not_promote_document_skill_by_weak_image_terms(
+    tmp_path,
+):
     _write_skill(
         tmp_path,
         "docx",
-        "Create or edit professional documents and artifacts.",
+        (
+            "Create Word documents. Also supports inserting or replacing "
+            "images in documents."
+        ),
     )
     _write_skill(tmp_path, "imagegen", "Generate or edit raster images.")
     _write_skill(
@@ -140,10 +145,49 @@ def test_semantic_tie_returns_clarify_route(tmp_path):
     assert route.kind == "clarify"
     assert route.reason == "semantic_ambiguous"
     assert {skill.name for skill in route.skills} == {
-        "docx",
         "imagegen",
         "nano-banana-pro-1.0.1",
     }
+
+
+def test_document_image_request_can_still_match_docx(tmp_path):
+    _write_skill(
+        tmp_path,
+        "docx",
+        (
+            "Create Word documents. Also supports inserting or replacing "
+            "images in documents."
+        ),
+    )
+    _write_skill(tmp_path, "imagegen", "Generate or edit raster images.")
+
+    route = _router(tmp_path).route("在 Word 文档里替换图片")
+
+    assert route is not None
+    assert route.kind == "invoke"
+    assert route.skill.name == "docx"
+
+
+def test_semantic_presentation_request_matches_pptx(tmp_path):
+    _write_skill(tmp_path, "pptx", "Create PowerPoint presentations.")
+    _write_skill(tmp_path, "docx", "Create Word documents.")
+
+    route = _router(tmp_path).route("帮我做一个 20 页 PPT")
+
+    assert route is not None
+    assert route.kind == "invoke"
+    assert route.skill.name == "pptx"
+
+
+def test_semantic_spreadsheet_request_matches_xlsx(tmp_path):
+    _write_skill(tmp_path, "xlsx", "Create and edit Excel spreadsheets.")
+    _write_skill(tmp_path, "docx", "Create Word documents.")
+
+    route = _router(tmp_path).route("读取这个表格并生成统计图")
+
+    assert route is not None
+    assert route.kind == "invoke"
+    assert route.skill.name == "xlsx"
 
 
 def test_ambiguous_semantic_match_asks_user_to_choose(tmp_path):
@@ -172,3 +216,19 @@ def test_load_skill_rejects_disabled_skill(tmp_path):
     text = response.content[0].get("text", "")
 
     assert "not enabled" in text
+
+
+def test_load_skill_includes_skill_relative_runtime_context(tmp_path):
+    _write_skill(tmp_path, "imagegen", "Generate or edit raster images.")
+    set_current_workspace_dir(tmp_path)
+    set_current_channel_name("console")
+
+    response = asyncio.run(load_skill("imagegen", "画小猫"))
+    payload = json.loads(response.content[0].get("text", ""))
+
+    assert payload["skill_dir"].endswith("imagegen")
+    assert "Relative paths in SKILL.md are resolved from skill_dir" in payload[
+        "runtime_note"
+    ]
+    assert "This skill is installed at" in payload["prompt"]
+    assert "relative to that skill directory" in payload["prompt"]

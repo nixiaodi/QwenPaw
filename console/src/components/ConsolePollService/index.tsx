@@ -15,6 +15,10 @@ interface BubbleItem extends PushMessage {
   dismissAt: number;
 }
 
+function getBackendSessionId(): string {
+  return (window as any).currentSessionId || "";
+}
+
 export default function ConsolePollService() {
   const [items, setItems] = useState<BubbleItem[]>([]);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -33,8 +37,9 @@ export default function ConsolePollService() {
 
   useEffect(() => {
     const tick = () => {
+      const currentSessionId = getBackendSessionId();
       consoleApi
-        .getPushMessages()
+        .getPushMessages(currentSessionId || undefined)
         .then((res) => {
           // Update pending approvals (global, will be filtered by Chat component)
           if (res?.pending_approvals) {
@@ -48,6 +53,15 @@ export default function ConsolePollService() {
           const newItems: BubbleItem[] = [];
           const now = Date.now();
           for (const m of res.messages) {
+            if (
+              currentSessionId &&
+              m.session_id &&
+              m.root_session_id &&
+              m.session_id !== currentSessionId &&
+              m.root_session_id !== currentSessionId
+            ) {
+              continue;
+            }
             if (seen.has(m.id)) continue;
             seen.add(m.id);
             newItems.push({ ...m, dismissAt: now + AUTO_DISMISS_MS });

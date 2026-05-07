@@ -76,6 +76,7 @@ class StopCommandHandler(BaseControlCommandHandler):
         )
         try:
             from ....user_input.service import get_user_input_service
+            from ....runtime_status.broadcast import clear_runtime_status
 
             user_input_service = get_user_input_service()
             cancelled_inputs = await (
@@ -83,9 +84,10 @@ class StopCommandHandler(BaseControlCommandHandler):
                     target_session_id,
                 )
             )
+            clear_runtime_status(workspace.agent_id, target_session_id)
         except Exception:
             logger.debug(
-                "/stop: failed to cancel pending user input requests",
+                "/stop: failed to clear pending interaction state",
                 exc_info=True,
             )
             cancelled_inputs = 0

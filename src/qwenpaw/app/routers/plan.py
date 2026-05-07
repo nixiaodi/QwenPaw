@@ -44,8 +44,14 @@ async def _plan_from_session_state(
         session = workspace.runner.session
         states = await session.get_session_state_dict(
             session_id=session_id,
+            user_id="default",
             allow_not_exist=True,
         )
+        if not states:
+            states = await session.get_session_state_dict(
+                session_id=session_id,
+                allow_not_exist=True,
+            )
     except Exception:
         logger.debug("Failed to read session state for plan", exc_info=True)
         return None

@@ -61,7 +61,7 @@ import {
   type RuntimeLoadingBridgeApi,
 } from "./utils";
 
-const CHAT_ATTACHMENT_MAX_MB = 10;
+const CHAT_ATTACHMENT_MAX_MB = 50;
 
 interface SessionInfo {
   session_id?: string;
@@ -1269,7 +1269,7 @@ export default function ChatPage() {
           message.warning(t("chat.attachments.imageOnlyWarning"));
         }
         const sizeMb = file.size / 1024 / 1024;
-        const isWithinLimit = sizeMb < CHAT_ATTACHMENT_MAX_MB;
+        const isWithinLimit = sizeMb <= CHAT_ATTACHMENT_MAX_MB;
 
         if (!isWithinLimit) {
           message.error(

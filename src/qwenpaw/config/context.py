@@ -90,6 +90,12 @@ current_channel_name: ContextVar[str | None] = ContextVar(
 )
 
 
+current_shell_command_executable: ContextVar[str | None] = ContextVar(
+    "current_shell_command_executable",
+    default=None,
+)
+
+
 def get_current_channel_name() -> str | None:
     """Get the current channel name from context."""
     return current_channel_name.get()
@@ -115,3 +121,21 @@ def get_current_request_context() -> dict[str, str] | None:
 def set_current_request_context(context: dict[str, str] | None) -> None:
     """Set the current request context for tool functions."""
     current_request_context.set(dict(context) if context is not None else None)
+
+
+def get_current_shell_command_executable() -> str | None:
+    """Get the configured shell executable for execute_shell_command.
+
+    Returns:
+        Path to the shell executable, or None if not configured.
+    """
+    return current_shell_command_executable.get()
+
+
+def set_current_shell_command_executable(executable: str | None) -> None:
+    """Set the configured shell executable for execute_shell_command.
+
+    Args:
+        executable: Path to the shell executable (e.g. "/bin/bash").
+    """
+    current_shell_command_executable.set(executable)

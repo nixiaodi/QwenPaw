@@ -1,4 +1,5 @@
-import { Layout, Space, Badge, Spin } from "antd";
+import { Layout, Space, Badge, Spin, Tooltip, Dropdown } from "antd";
+import type { MenuProps } from "antd";
 import LanguageSwitcher from "../components/LanguageSwitcher/index";
 import ThemeToggleButton from "../components/ThemeToggleButton";
 import { useTranslation } from "react-i18next";
@@ -6,6 +7,10 @@ import { Button, Modal } from "@agentscope-ai/design";
 import styles from "./index.module.less";
 import api from "../api";
 import {
+  GITHUB_URL,
+  getDocsUrl,
+  getFeatureDemosUrl,
+  getFaqUrl,
   getReleaseNotesUrl,
   PYPI_URL,
   ONE_HOUR_MS,
@@ -16,7 +21,17 @@ import {
 import { useState, useEffect } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { CopyOutlined, CheckOutlined, TagOutlined } from "@ant-design/icons";
+import {
+  CopyOutlined,
+  CheckOutlined,
+  TagOutlined,
+  GithubOutlined,
+  FileTextOutlined,
+  ReadOutlined,
+  PlayCircleOutlined,
+  QuestionCircleOutlined,
+  DownOutlined,
+} from "@ant-design/icons";
 
 const { Header: AntHeader } = Layout;
 
@@ -170,6 +185,52 @@ export default function Header() {
           )}
         </div>
         <Space size="middle">
+          <Dropdown
+            menu={{
+              items: [
+                {
+                  key: "tutorial",
+                  icon: <ReadOutlined />,
+                  label: t("header.tutorial"),
+                  onClick: () => handleNavClick(getDocsUrl(i18n.language)),
+                },
+                {
+                  key: "featureDemos",
+                  icon: <PlayCircleOutlined />,
+                  label: t("header.featureDemos"),
+                  onClick: () =>
+                    handleNavClick(getFeatureDemosUrl(i18n.language)),
+                },
+                {
+                  key: "changelog",
+                  icon: <FileTextOutlined />,
+                  label: t("header.changelog"),
+                  onClick: () =>
+                    handleNavClick(getReleaseNotesUrl(i18n.language)),
+                },
+                {
+                  key: "faq",
+                  icon: <QuestionCircleOutlined />,
+                  label: t("header.faq"),
+                  onClick: () => handleNavClick(getFaqUrl(i18n.language)),
+                },
+              ] as MenuProps["items"],
+            }}
+          >
+            <Button type="text">
+              {t("header.resources")} <DownOutlined />
+            </Button>
+          </Dropdown>
+          <Tooltip title={t("header.github")}>
+            <Button
+              type="text"
+              icon={<GithubOutlined />}
+              onClick={() => handleNavClick(GITHUB_URL)}
+            >
+              {t("header.github")}
+            </Button>
+          </Tooltip>
+          <div className={styles.headerDivider} />
           <LanguageSwitcher />
           <ThemeToggleButton />
         </Space>

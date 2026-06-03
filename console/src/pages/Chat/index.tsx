@@ -69,8 +69,7 @@ import {
 } from "./utils";
 import { openExternalLink } from "../../utils/openExternalLink";
 import { getLastEditorCopy } from "../Coding/lastEditorCopy";
-
-const CHAT_ATTACHMENT_MAX_MB = 50;
+import { useUploadLimitStore } from "../../stores/uploadLimitStore";
 
 interface SessionInfo {
   session_id?: string;
@@ -523,7 +522,14 @@ function useMessageHistoryNavigation(
 // Chat input draft persistence
 // ---------------------------------------------------------------------------
 
-const DRAFT_STORAGE_KEY = "qwenpaw_chat_input_draft";
+const DRAFT_STORAGE_KEY_PREFIX = "qwenpaw_chat_input_draft";
+let draftSuppressed = false;
+
+function getDraftStorageKey(agentId?: string): string {
+  return agentId
+    ? `${DRAFT_STORAGE_KEY_PREFIX}_${agentId}`
+    : DRAFT_STORAGE_KEY_PREFIX;
+}
 
 interface DraftState {
   value: string;
@@ -531,7 +537,9 @@ interface DraftState {
   selectionEnd: number;
 }
 
-function useChatInputDraft(isChatActive: () => boolean) {
+function useChatInputDraft(isChatActive: () => boolean, agentId?: string) {
+  const storageKey = getDraftStorageKey(agentId);
+
   useEffect(() => {
     if (!isChatActive()) return;
 
@@ -549,9 +557,9 @@ function useChatInputDraft(isChatActive: () => boolean) {
         selectionEnd: textarea.selectionEnd,
       };
       if (draft.value) {
-        localStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify(draft));
+        localStorage.setItem(storageKey, JSON.stringify(draft));
       } else {
-        localStorage.removeItem(DRAFT_STORAGE_KEY);
+        localStorage.removeItem(storageKey);
       }
     };
 
@@ -574,7 +582,7 @@ function useChatInputDraft(isChatActive: () => boolean) {
       const textarea = getTextarea();
       if (textarea) {
         clearInterval(restoreInterval);
-        const raw = localStorage.getItem(DRAFT_STORAGE_KEY);
+        const raw = localStorage.getItem(storageKey);
         if (raw) {
           try {
             const draft: DraftState = JSON.parse(raw);
@@ -601,13 +609,16 @@ function useChatInputDraft(isChatActive: () => boolean) {
       if (saveTimer) clearTimeout(saveTimer);
       document.removeEventListener("input", handleInput, true);
 
-      // Final save on unmount
-      const textarea = getTextarea();
-      if (textarea) {
-        saveDraft(textarea);
+      // Final save on unmount (skip if message was just sent)
+      if (!draftSuppressed) {
+        const textarea = getTextarea();
+        if (textarea) {
+          saveDraft(textarea);
+        }
       }
+      draftSuppressed = false;
     };
-  }, [isChatActive]);
+  }, [isChatActive, storageKey]);
 }
 
 /**
@@ -1159,7 +1170,7 @@ export default function ChatPage() {
   }, []);
 
   useMessageHistoryNavigation(chatRef, isChatActive, isComposingRef);
-  useChatInputDraft(isChatActive);
+  useChatInputDraft(isChatActive, selectedAgent);
   useChatPasteFromEditor();
 
   const onFileCardClick = useCallback(
@@ -1491,16 +1502,15 @@ export default function ChatPage() {
           message.warning(t("chat.attachments.imageOnlyWarning"));
         }
         const sizeMb = file.size / 1024 / 1024;
-        const isWithinLimit = sizeMb <= CHAT_ATTACHMENT_MAX_MB;
-
-        if (!isWithinLimit) {
+        const uploadLimit = useUploadLimitStore.getState().uploadMaxSizeMb;
+        if (uploadLimit !== null && sizeMb > uploadLimit) {
           message.error(
             t("chat.attachments.fileSizeExceeded", {
-              limit: CHAT_ATTACHMENT_MAX_MB,
+              limit: uploadLimit,
               size: sizeMb.toFixed(2),
             }),
           );
-          onError?.(new Error(`File size exceeds ${CHAT_ATTACHMENT_MAX_MB}MB`));
+          onError?.(new Error(`File size exceeds ${uploadLimit}MB`));
           return;
         }
 
@@ -1519,6 +1529,8 @@ export default function ChatPage() {
 
     const handleBeforeSubmit = async () => {
       if (isComposingRef.current) return false;
+      localStorage.removeItem(getDraftStorageKey(selectedAgent));
+      draftSuppressed = true;
       return true;
     };
 
@@ -1560,13 +1572,20 @@ export default function ChatPage() {
         attachments: {
           multiple: true,
           trigger: function (props: any) {
+            const uploadLimit = useUploadLimitStore.getState().uploadMaxSizeMb;
             const tooltipKey = multimodalCaps.supportsMultimodal
               ? multimodalCaps.supportsImage && !multimodalCaps.supportsVideo
                 ? "chat.attachments.tooltipImageOnly"
                 : "chat.attachments.tooltip"
               : "chat.attachments.tooltipNoMultimodal";
+            const tooltipTitle =
+              uploadLimit !== null
+                ? `${t(tooltipKey)}, ${t("chat.attachments.fileSizeLimit", {
+                    limit: uploadLimit,
+                  })}`
+                : t(tooltipKey);
             return (
-              <Tooltip title={t(tooltipKey, { limit: CHAT_ATTACHMENT_MAX_MB })}>
+              <Tooltip title={tooltipTitle}>
                 <IconButton
                   disabled={props?.disabled}
                   icon={<SparkAttachmentLine />}

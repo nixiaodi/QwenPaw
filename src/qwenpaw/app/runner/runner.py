@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import sys
+import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, AsyncGenerator, Coroutine
 
@@ -494,6 +495,20 @@ class AgentRunner(Runner):
             reason="semantic_user_selected",
             candidates=route.candidates,
         ), None
+
+    @staticmethod
+    def _extract_text_content(msg) -> str:
+        """Return the concatenated text of a Msg's content."""
+        content = getattr(msg, "content", None)
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            return "\n".join(
+                block.get("text") or ""
+                for block in content
+                if isinstance(block, dict) and block.get("type") == "text"
+            )
+        return ""
 
     @staticmethod
     def _rewrite_last_message_text(
@@ -1235,79 +1250,104 @@ class AgentRunner(Runner):
 
             # --- Execution: Mission Mode (phased) or standard -----
             seen_first_event = False
-            if mission_info is not None:
-                from ...agents.mission.mission_runner import (
-                    run_mission_phase1,
-                    run_mission_phase2,
-                )
+            from ...observability.langfuse import agent_trace_scope
 
-                phase = mission_info["mission_phase"]
-                loop_dir = Path(mission_info["loop_dir"])
-                max_iters = mission_info.get(
-                    "max_iterations",
-                    20,
-                )
+            root_session_id = base_request_context.get(
+                "root_session_id",
+                session_id,
+            )
+            trace_metadata = {
+                "session_id": session_id,
+                "root_session_id": root_session_id,
+                "user_id": user_id,
+                "channel": channel,
+                "agent_id": self.agent_id,
+                "root_agent_id": base_request_context.get("root_agent_id"),
+                "source": base_request_context.get("source"),
+            }
+            async with agent_trace_scope(
+                trace_id=uuid.uuid4().hex,
+                name="qwenpaw.agent.react_loop",
+                metadata=trace_metadata,
+                input={
+                    "query": query,
+                    "messages_count": len(msgs) if msgs else 0,
+                },
+            ):
+                if mission_info is not None:
+                    from ...agents.mission.mission_runner import (
+                        run_mission_phase1,
+                        run_mission_phase2,
+                    )
 
-                if phase == 1:
-                    async for msg, last in run_mission_phase1(
-                        agent=agent,
-                        msgs=msgs,
-                        loop_dir=loop_dir,
-                        max_iterations=max_iters,
-                        agent_id=self.agent_id,
-                    ):
-                        if not seen_first_event:
-                            seen_first_event = True
-                            self._emit_runtime_status(
-                                session_id=session_id,
-                                root_session_id=base_request_context[
-                                    "root_session_id"
-                                ],
-                                chat_id=(chat.id if chat is not None else None),
-                                stage="model_streaming",
-                                message="模型已开始响应。",
-                            )
-                        yield msg, last
+                    phase = mission_info["mission_phase"]
+                    loop_dir = Path(mission_info["loop_dir"])
+                    max_iters = mission_info.get(
+                        "max_iterations",
+                        20,
+                    )
+
+                    if phase == 1:
+                        async for msg, last in run_mission_phase1(
+                            agent=agent,
+                            msgs=msgs,
+                            loop_dir=loop_dir,
+                            max_iterations=max_iters,
+                            agent_id=self.agent_id,
+                        ):
+                            if not seen_first_event:
+                                seen_first_event = True
+                                self._emit_runtime_status(
+                                    session_id=session_id,
+                                    root_session_id=root_session_id,
+                                    chat_id=(
+                                        chat.id if chat is not None else None
+                                    ),
+                                    stage="model_streaming",
+                                    message="模型已开始响应。",
+                                )
+                            yield msg, last
+                    else:
+                        async for msg, last in run_mission_phase2(
+                            agent=agent,
+                            msgs=msgs,
+                            loop_dir=loop_dir,
+                            max_iterations=max_iters,
+                            agent_id=self.agent_id,
+                        ):
+                            if not seen_first_event:
+                                seen_first_event = True
+                                self._emit_runtime_status(
+                                    session_id=session_id,
+                                    root_session_id=root_session_id,
+                                    chat_id=(
+                                        chat.id if chat is not None else None
+                                    ),
+                                    stage="model_streaming",
+                                    message="模型已开始响应。",
+                                )
+                            yield msg, last
                 else:
-                    async for msg, last in run_mission_phase2(
-                        agent=agent,
-                        msgs=msgs,
-                        loop_dir=loop_dir,
-                        max_iterations=max_iters,
-                        agent_id=self.agent_id,
+                    async for (
+                        msg,
+                        last,
+                    ) in _stream_printing_messages_interruptible(
+                        agents=[agent],
+                        coroutine_task=agent(msgs),
                     ):
                         if not seen_first_event:
                             seen_first_event = True
                             self._emit_runtime_status(
                                 session_id=session_id,
-                                root_session_id=base_request_context[
-                                    "root_session_id"
-                                ],
+                                root_session_id=root_session_id,
                                 chat_id=(chat.id if chat is not None else None),
                                 stage="model_streaming",
                                 message="模型已开始响应。",
                             )
                         yield msg, last
-            else:
-                async for msg, last in _stream_printing_messages_interruptible(
-                    agents=[agent],
-                    coroutine_task=agent(msgs),
-                ):
-                    if not seen_first_event:
-                        seen_first_event = True
-                        self._emit_runtime_status(
-                            session_id=session_id,
-                            root_session_id=base_request_context[
-                                "root_session_id"
-                            ],
-                            chat_id=(chat.id if chat is not None else None),
-                            stage="model_streaming",
-                            message="模型已开始响应。",
-                        )
-                    yield msg, last
             self._emit_runtime_status(
                 session_id=session_id,
-                root_session_id=base_request_context["root_session_id"],
+                root_session_id=root_session_id,
                 chat_id=(chat.id if chat is not None else None),
                 stage="completed",
                 status="completed",
@@ -1332,11 +1372,14 @@ class AgentRunner(Runner):
             )
             if cancelled_count > 0:
                 logger.info(
-                    "Auto-denied %d pending approval(s) for root session %s",
+                    "Auto-denied %d pending approval(s) for root "
+                    "session %s",
                     cancelled_count,
-                    root_session_id[:8]
-                    if len(root_session_id) >= 8
-                    else root_session_id,
+                    (
+                        root_session_id[:8]
+                        if len(root_session_id) >= 8
+                        else root_session_id
+                    ),
                 )
 
             if agent is not None:

@@ -102,6 +102,10 @@
   text-align: center;
 }
 
+.suggestionLabelCompact {
+  width: auto;
+}
+
 .suggestionCommand {
   flex: 0 1 auto;
   min-width: 0;
@@ -121,6 +125,11 @@
   font-weight: 500;
   line-height: 18px;
   padding: 0 8px;
+}
+
+.suggestionLabelCompact .suggestionCommand {
+  flex-basis: auto;
+  max-width: min(320px, calc(100vw - 96px));
 }
 
 .suggestionDescription {
@@ -158,6 +167,17 @@
   .ant-cascader-dropdown .ant-cascader-menu-item-content {
     min-width: 0;
     max-width: 100%;
+  }
+
+  .qwenpaw-suggestion .qwenpaw-cascader-menu,
+  .qwenpaw-suggestion .ant-cascader-menu,
+  .ant-cascader-dropdown.qwenpaw-suggestion .qwenpaw-cascader-menu,
+  .ant-cascader-dropdown.qwenpaw-suggestion .ant-cascader-menu {
+    height: auto !important;
+    max-height: 210px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-width: thin;
   }
 }
 
@@ -265,5 +285,42 @@
   .chatDisabledOverlay :global(textarea),
   .chatDisabledOverlay :global(input[type="text"]) {
     background-color: #2a2a2a !important;
+  }
+}
+
+/* ---- Rate-limit guidance banner ---- */
+.rateLimitBanner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  background: rgba(250, 173, 20, 0.08);
+  border-top: 1px solid rgba(250, 173, 20, 0.2);
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+
+.rateLimitText {
+  font-size: 13px;
+  color: #d48806;
+  flex: 1;
+  min-width: 120px;
+}
+
+.rateLimitActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+:global(.dark-mode) {
+  .rateLimitBanner {
+    background: rgba(250, 173, 20, 0.06);
+    border-top-color: rgba(250, 173, 20, 0.15);
+  }
+
+  .rateLimitText {
+    color: #ffc53d;
   }
 }

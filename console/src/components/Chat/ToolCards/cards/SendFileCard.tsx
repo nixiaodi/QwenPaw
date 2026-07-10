@@ -16,9 +16,25 @@ const SendFileCard: React.FC<SendFileCardProps> = ({
 }) => {
   const { t } = useTranslation();
   const params = content.params || {};
-  const filePath = (params.file_path || "") as string;
+  const filePath = (params.file_path ||
+    params.image_path ||
+    params.video_path ||
+    params.audio_path ||
+    params.path ||
+    "") as string;
   const file = shortFileName(filePath);
   const title = file ? t("tool.sendFile", { file }) : t("tool.sendFileDefault");
+
+  if (content.status === "error") {
+    return (
+      <ToolCardShell
+        content={content}
+        isStreaming={isStreaming}
+        icon={<SendOutlined />}
+        title={title}
+      />
+    );
+  }
 
   const media = getMediaInfo(content);
 

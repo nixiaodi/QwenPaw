@@ -15,7 +15,7 @@ from pydantic import (
     model_validator,
 )
 import shortuuid
-from agentscope_runtime.engine.schemas.exception import (
+from qwenpaw.exceptions import (
     ConfigurationException,
 )
 
@@ -23,6 +23,8 @@ from .timezone import detect_system_timezone
 from ..constant import (
     HEARTBEAT_DEFAULT_EVERY,
     HEARTBEAT_DEFAULT_TARGET,
+    HEARTBEAT_DEFAULT_TIMEOUT_SECONDS,
+    HEARTBEAT_MAX_TIMEOUT_SECONDS,
     LLM_ACQUIRE_TIMEOUT,
     LLM_BACKOFF_BASE,
     LLM_BACKOFF_CAP,
@@ -107,6 +109,7 @@ def _get_default_acp_agents() -> Dict[str, ACPAgentConfig]:
 class ACPConfig(BaseModel):
     """ACP (Agent Communication Protocol) configuration."""
 
+    node_path: str = ""
     agents: Dict[str, ACPAgentConfig] = Field(
         default_factory=_get_default_acp_agents,
     )
@@ -203,6 +206,9 @@ class BaseChannelConfig(BaseModel):
     allow_from: List[str] = Field(default_factory=list)
     deny_message: str = ""
     require_mention: bool = False
+    # Buffer media-only messages until a text message arrives, then merge.
+    # Disable to process all messages immediately.
+    no_text_debounce: bool = True
     access_control_dm: bool = False
     access_control_group: bool = False
     # Channel-level mute: completely disable DM or group messages
@@ -224,6 +230,8 @@ class DiscordConfig(BaseChannelConfig):
     http_proxy: str = ""
     http_proxy_auth: str = ""
     accept_bot_messages: bool = False
+    streaming_enabled: bool = False
+    media_dir: Optional[str] = None
 
 
 class DingTalkConfig(BaseChannelConfig):
@@ -238,6 +246,7 @@ class DingTalkConfig(BaseChannelConfig):
     card_auto_layout: bool = False
     at_sender_on_reply: bool = False
     streaming_enabled: bool = False
+    endpoint: str = ""
 
 
 class FeishuConfig(BaseChannelConfig):
@@ -279,6 +288,7 @@ class OneBotConfig(BaseChannelConfig):
 
 class TelegramConfig(BaseChannelConfig):
     bot_token: str = ""
+    base_url: str = ""
     http_proxy: str = ""
     http_proxy_auth: str = ""
     show_typing: Optional[bool] = None
@@ -361,6 +371,7 @@ class MatrixConfig(BaseChannelConfig):
     mention_pill_in_body: bool = False
     # When True, apply m.mentions + optional pill on outbound messages.
     outbound_structured_mentions: bool = True
+    streaming_enabled: bool = False
 
 
 class VoiceChannelConfig(BaseChannelConfig):
@@ -455,6 +466,32 @@ class WeChatConfig(BaseChannelConfig):
     message_merge_delay_ms: Optional[int] = 0
 
 
+class SlackConfig(BaseChannelConfig):
+    """Slack channel: Socket Mode connection with edit-in-place streaming.
+
+    Uses slack-bolt AsyncSocketModeHandler (aiohttp WebSocket) to connect
+    to a single Slack workspace. Supports incremental message rendering
+    via chat.postMessage + chat.update (edit-in-place) when streaming is
+    enabled.
+    """
+
+    bot_token: str = ""
+    app_token: str = ""
+    bot_prefix: str = ""
+    proxy: Optional[str] = None
+    streaming_enabled: bool = False
+    require_mention: bool = True
+    media_dir: Optional[str] = None
+    dm_policy: str = "open"
+    group_policy: str = "open"
+    allow_from: Optional[list] = None
+    deny_message: str = ""
+    access_control_dm: bool = False
+    access_control_group: bool = False
+    dm_disabled: bool = False
+    group_disabled: bool = False
+
+
 class ChannelConfig(BaseModel):
     """Built-in channel configs; extra keys allowed for plugin channels."""
 
@@ -476,6 +513,7 @@ class ChannelConfig(BaseModel):
     xiaoyi: XiaoYiConfig = XiaoYiConfig()
     yuanbao: YuanbaoConfig = YuanbaoConfig()
     wechat: WeChatConfig = WeChatConfig()
+    slack: SlackConfig = SlackConfig()
     onebot: OneBotConfig = OneBotConfig()
 
     @model_validator(mode="before")
@@ -516,6 +554,13 @@ class HeartbeatConfig(BaseModel):
     enabled: bool = Field(default=False, description="Whether heartbeat is on")
     every: str = Field(default=HEARTBEAT_DEFAULT_EVERY)
     target: str = Field(default=HEARTBEAT_DEFAULT_TARGET)
+    timeout_seconds: int = Field(
+        default=HEARTBEAT_DEFAULT_TIMEOUT_SECONDS,
+        ge=1,
+        le=HEARTBEAT_MAX_TIMEOUT_SECONDS,
+        alias="timeoutSeconds",
+        description="Maximum seconds for one heartbeat execution",
+    )
     active_hours: Optional[ActiveHoursConfig] = Field(
         default=None,
         alias="activeHours",
@@ -545,16 +590,6 @@ class AutoMemorySearchConfig(BaseModel):
         ),
     )
 
-    min_score: float = Field(
-        default=0.3,
-        ge=0.0,
-        le=1.0,
-        description=(
-            "Minimum relevance score for results when auto memory"
-            " search is enabled"
-        ),
-    )
-
 
 class EmbeddingModelConfig(BaseModel):
     """Embedding model configuration."""
@@ -580,7 +615,10 @@ class EmbeddingModelConfig(BaseModel):
         default=False,
         description="Whether to use custom dimensions",
     )
-    max_cache_size: int = Field(default=3000, description="Maximum cache size")
+    max_cache_size: int = Field(
+        default=10000,
+        description="Maximum cache size",
+    )
     max_input_length: int = Field(
         default=8192,
         description="Maximum input length for embedding",
@@ -592,35 +630,12 @@ class EmbeddingModelConfig(BaseModel):
 
 
 class ADBPGMemoryConfig(BaseModel):
-    """ADBPG (AnalyticDB for PostgreSQL) memory configuration."""
+    """ADBPG (AnalyticDB for PostgreSQL) REST memory configuration."""
 
     model_config = ConfigDict(extra="ignore")
 
-    # Database connection
-    host: str = ""
-    port: int = 5432
-    user: str = ""
-    password: str = ""
-    dbname: str = ""
-
-    # LLM for server-side fact extraction
-    llm_model: str = ""
-    llm_api_key: str = ""
-    llm_base_url: str = ""
-
-    # Embedding
-    embedding_model: str = ""
-    embedding_api_key: str = ""
-    embedding_base_url: str = ""
-    embedding_dims: int = 1024
-
-    # API mode
-    api_mode: str = Field(
-        default="rest",
-        description="API mode: 'sql' (direct psycopg2) or 'rest' (HTTP API)",
-    )
-    rest_api_key: str = ""
     rest_base_url: str = ""
+    rest_api_key: str = ""
 
     # Behavior
     memory_isolation: bool = Field(
@@ -628,8 +643,12 @@ class ADBPGMemoryConfig(BaseModel):
         description="Per-agent memory isolation (True) or shared (False)",
     )
     search_timeout: float = 10.0
-    pool_minconn: int = 1
-    pool_maxconn: int = 5
+    auto_memory_search_config: AutoMemorySearchConfig = Field(
+        default_factory=lambda: AutoMemorySearchConfig(
+            enabled=True,
+            max_results=3,
+        ),
+    )
 
 
 class ReMeLightMemoryConfig(BaseModel):
@@ -637,18 +656,50 @@ class ReMeLightMemoryConfig(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
+    metadata_dir: str = Field(
+        default="mem_metadata",
+        description="Subdirectory for ReMe persistent state",
+    )
+    session_dir: str = Field(
+        default="mem_session",
+        description=(
+            "Subdirectory for ReMe source conversation logs used by "
+            "auto-memory"
+        ),
+    )
+    mem_session_dir: str = Field(
+        default="mem_agent",
+        description="Subdirectory for ReMe internal memory-agent sessions",
+    )
+    resource_dir: str = Field(
+        default="resource",
+        description="Subdirectory for external assets",
+    )
+    daily_dir: str = Field(
+        default="memory",
+        description="Subdirectory for daily memory",
+    )
+    digest_dir: str = Field(
+        default="digest",
+        description="Subdirectory for digest memory",
+    )
+    enable_search_raw_log: bool = Field(
+        default=False,
+        description="Whether to enable raw log search",
+    )
+
     summarize_when_compact: bool = Field(
         default=True,
         description="Whether to enable memory summarization during compaction",
     )
 
     auto_memory_interval: int | None = Field(
-        default=None,
-        description="Auto memory every N user queries. None disables "
-        "periodic auto memory, 1 means auto memory after every user "
-        "query, 2 means every 2 queries, etc. WARNING: Setting too "
-        "small (e.g., 1-3) may cause high token usage and heavy "
-        "background task burden. Recommended: 5 or 10.",
+        default=5,
+        description="Auto memory every N user queries. 1 means auto "
+        "memory after every user query, 2 means every 2 queries, etc. "
+        "None or <= 0 disables periodic auto memory. WARNING: Setting "
+        "too small (e.g., 1-3) may cause high token usage and heavy "
+        "background task burden.",
     )
 
     dream_cron: str = Field(
@@ -671,15 +722,6 @@ class ReMeLightMemoryConfig(BaseModel):
             "Whether to clear and rebuild the memory search index when the"
             " agent starts. Set to False to skip re-indexing and only monitor"
             " new file changes."
-        ),
-    )
-
-    recursive_file_watcher: bool = Field(
-        default=False,
-        description=(
-            "Whether to watch memory directory recursively. "
-            "Set to True to include subdirectories like memory/subdirectory/* "
-            "in vector search indexing."
         ),
     )
 
@@ -706,17 +748,12 @@ class ContextCompactConfig(BaseModel):
 
     reserve_threshold_ratio: float = Field(
         default=0.1,
-        ge=0,
+        gt=0,
         le=0.3,
         description=(
             "Context reserve threshold ratio: the most recent fraction of the "
             "context is preserved after compaction to maintain continuity"
         ),
-    )
-
-    compact_with_thinking_block: bool = Field(
-        default=True,
-        description="Whether to include thinking blocks when compacting",
     )
 
 
@@ -748,6 +785,16 @@ class ToolResultPruningConfig(BaseModel):
         ge=1000,
         description=(
             "Byte threshold for recent messages in tool result pruning"
+        ),
+    )
+
+    execution_layer_max_bytes: int = Field(
+        default=50000,
+        ge=1000,
+        description=(
+            "Hard byte cap applied at execution time before the tool "
+            "response is inserted into the agent context. Independent of "
+            "the tiered historical pruning thresholds."
         ),
     )
 
@@ -783,10 +830,113 @@ class ToolResultPruningConfig(BaseModel):
     )
 
 
+class ScrollContextConfig(BaseModel):
+    """Scroll (retrieval-driven) context manager configuration.
+
+    Only consulted when ``LightContextConfig.strategy == "scroll"``. The
+    durable history lives at ``{working_dir}/{db_filename}``; evicted turns
+    fold into an in-context eviction index recallable from the sandboxed
+    ``recall_history_python`` REPL.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    db_filename: str = Field(
+        default="history.db",
+        description="SQLite history store filename, relative to working_dir.",
+    )
+
+    tool_output_token_cap: int = Field(
+        default=3000,
+        ge=100,
+        description=(
+            "In-context cap for a single tool result; the full output is "
+            "written through to history and recalled by tool_call_id."
+        ),
+    )
+
+    repl_timeout_s: int = Field(
+        default=300,
+        ge=1,
+        description=(
+            "Per-call timeout for the recall_history_python REPL tool."
+        ),
+    )
+
+    history_retention_days: int = Field(
+        default=30,
+        ge=0,
+        description=(
+            "Days of durable history to keep; rows older than this are "
+            "purged automatically on startup and on agent teardown. Default "
+            "30 keeps roughly the last month. Set 0 to keep history forever "
+            "(unbounded growth — only the capacity warning fires)."
+        ),
+    )
+
+    allow_unsandboxed: bool = Field(
+        default=False,
+        description=(
+            "UNSAFE escape hatch. The recall_history_python recall REPL runs "
+            "model-authored Python and is only isolated by the sandbox; the "
+            "sandbox config is injected by the governance layer. When that "
+            "layer is degraded the tool fails closed and refuses to run. Set "
+            "this to true to run the REPL with NO isolation (arbitrary host "
+            "code as the agent user) — trusted local/dev use only."
+        ),
+    )
+
+    offload_dialog: bool = Field(
+        default=False,
+        description=(
+            "Also archive evicted turns to legacy ``dialog/{date}.jsonl`` "
+            "files. Off by default: under scroll the durable ``history.db`` "
+            "is already the full record, so dialog files are a redundant "
+            "opt-in for external consumers (analytics, backup). When on, "
+            "dialog is written on every eviction AND on /clear, /new, "
+            "/compact; when off, scroll never writes dialog anywhere."
+        ),
+    )
+
+    summarize_unheadlined_evictions: bool = Field(
+        default=True,
+        description=(
+            "When an evicted span carries NO model headline, generate a "
+            "one-line summary of it (via the active model) to use as its "
+            "eviction-index entry instead of a bare ``(no milestone)`` line. "
+            "Keeps the index readable for legacy 1.x conversations (whose "
+            "turns predate headlines) and for tool-heavy spans the model "
+            "never headlined. The full turns stay recallable either way; "
+            "this only affects the descriptive label. Best-effort — a "
+            "model/timeout failure falls back to ``(no milestone)`` and never "
+            "blocks eviction. Costs one extra model call per such eviction."
+        ),
+    )
+
+    summarize_eviction_timeout_seconds: int = Field(
+        default=20,
+        ge=1,
+        description=(
+            "Per-eviction timeout for the un-headlined-span summary call "
+            "above. On timeout the span keeps a ``(no milestone)`` label; "
+            "eviction itself is never delayed beyond this."
+        ),
+    )
+
+
 class LightContextConfig(BaseModel):
     """Light context manager configuration."""
 
     model_config = ConfigDict(extra="ignore")
+
+    strategy: Literal["native", "scroll"] = Field(
+        default="scroll",
+        description=(
+            "Context management strategy. 'native' = AgentScope compression; "
+            "'scroll' = retrieval-driven history.db + eviction index with a "
+            "sandboxed recall_history_python recall REPL (the default)."
+        ),
+    )
 
     dialog_path: str = Field(
         default="dialog",
@@ -808,6 +958,9 @@ class LightContextConfig(BaseModel):
     )
     tool_result_pruning_config: ToolResultPruningConfig = Field(
         default_factory=ToolResultPruningConfig,
+    )
+    scroll_config: ScrollContextConfig = Field(
+        default_factory=ScrollContextConfig,
     )
 
 
@@ -843,6 +996,147 @@ class AutoTitleConfig(BaseModel):
     )
 
 
+class DoomLoopStageConfig(BaseModel):
+    """One escalation stage in doom loop detection."""
+
+    after: int = Field(
+        ge=1,
+        description=("Trigger after N consecutive repetitions"),
+    )
+    action: str = Field(
+        default="modify_prompt",
+        description=("Action when triggered: " "'modify_prompt' or 'stop'"),
+    )
+    prompt: str = Field(
+        default="",
+        description=("Warning text (modify_prompt) " "or stop reason (stop)"),
+    )
+
+
+class DoomLoopConfig(BaseModel):
+    """Doom loop detection configuration."""
+
+    enabled: bool = Field(
+        default=True,
+        description="Enable doom loop detection",
+    )
+    window_size: int = Field(
+        default=3,
+        ge=2,
+        description=("Sliding window size for " "repetition detection"),
+    )
+    similarity_threshold: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Similarity threshold to consider " "calls as repetitive"
+        ),
+    )
+    stages: List[DoomLoopStageConfig] = Field(
+        default_factory=lambda: [
+            DoomLoopStageConfig(
+                after=3,
+                action="modify_prompt",
+                prompt=(
+                    "[WARNING] Repetitive pattern "
+                    "detected. You are repeating "
+                    "similar actions without "
+                    "progress. Try a completely "
+                    "different approach."
+                ),
+            ),
+            DoomLoopStageConfig(
+                after=6,
+                action="stop",
+                prompt=(
+                    "Doom loop: agent stuck after " "6 consecutive repetitions"
+                ),
+            ),
+        ],
+        description=("Escalation stages (sorted by after)"),
+    )
+    in_loop_modes: bool = Field(
+        default=False,
+        description=("Also run during /goal and " "/mission loop modes"),
+    )
+
+
+class IterationGateConfig(BaseModel):
+    """Standalone iteration gate configuration."""
+
+    enabled: bool = Field(
+        default=True,
+        description="Enable iteration limit",
+    )
+    max_iterations: Optional[int] = Field(
+        default=None,
+        ge=1,
+        le=500,
+        description=(
+            "Maximum loop turns before stopping. "
+            "Falls back to AgentsRunningConfig.max_iters "
+            "when not set (legacy compat)."
+        ),
+    )
+
+
+class RubricGateConfig(BaseModel):
+    """Completion check gate configuration.
+
+    Prevents premature agent stop when the LLM
+    outputs text-only responses without tool calls.
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description=(
+            "Enable completion check to prevent "
+            "early stop on text-only responses"
+        ),
+    )
+    prompt: str = Field(
+        default=(
+            "You did not call any tool in the "
+            "last turn. If the task is truly "
+            "complete, confirm it. Otherwise, "
+            "continue working with tool calls."
+        ),
+        description=(
+            "Prompt injected when the agent " "produces a text-only response"
+        ),
+    )
+    max_interventions: int = Field(
+        default=1,
+        ge=1,
+        le=10,
+        description=(
+            "Max times to re-prompt per loop " "turn to avoid infinite retries"
+        ),
+    )
+    in_loop_modes: bool = Field(
+        default=False,
+        description=("Also run during /goal and " "/mission loop modes"),
+    )
+
+
+class LoopConfig(BaseModel):
+    """Loop engineering configuration."""
+
+    iteration: IterationGateConfig = Field(
+        default_factory=IterationGateConfig,
+        description="Iteration limit settings",
+    )
+    doom_loop: DoomLoopConfig = Field(
+        default_factory=DoomLoopConfig,
+        description="Repetition protection settings",
+    )
+    rubric: RubricGateConfig = Field(
+        default_factory=RubricGateConfig,
+        description="Completion check settings",
+    )
+
+
 class AgentsRunningConfig(BaseModel):
     """Agent runtime behavior configuration."""
 
@@ -856,16 +1150,9 @@ class AgentsRunningConfig(BaseModel):
         ),
     )
 
-    auto_continue_on_text_only: bool = Field(
-        default=False,
-        description=(
-            "When the model returns a text-only assistant message (no tool "
-            "calls), inject one follow-up hint and run one extra reasoning "
-            "pass with the same tool_choice as the current step (typically "
-            "'auto'), so the model can either emit tool calls or finish with "
-            "text. Does not use tool_choice='required' (that would force "
-            "tools and prevent a natural summary when the task is done)."
-        ),
+    loop: LoopConfig = Field(
+        default_factory=LoopConfig,
+        description="Loop engineering configuration",
     )
 
     llm_retry_enabled: bool = Field(
@@ -1354,6 +1641,8 @@ class MCPClientConfig(BaseModel):
         if isinstance(raw_transport, str):
             normalized = raw_transport.strip().lower()
             transport_alias_map = {
+                "streamable_http": "streamable_http",
+                "streamable-http": "streamable_http",
                 "streamablehttp": "streamable_http",
                 "http": "streamable_http",
                 "stdio": "stdio",
@@ -1481,6 +1770,18 @@ def _default_builtin_tools() -> Dict[str, BuiltinToolConfig]:
             enabled=True,
             description="Browser automation and web interaction",
             icon="🌐",
+        ),
+        "web_search": BuiltinToolConfig(
+            name="web_search",
+            enabled=True,
+            description="Search the web for real-time information",
+            icon="🔎",
+        ),
+        "web_fetch": BuiltinToolConfig(
+            name="web_fetch",
+            enabled=True,
+            description="Fetch and read content from a URL",
+            icon="📥",
         ),
         "desktop_screenshot": BuiltinToolConfig(
             name="desktop_screenshot",
@@ -1867,6 +2168,7 @@ ChannelConfigUnion = Union[
     MatrixConfig,
     VoiceChannelConfig,
     SIPChannelConfig,
+    SlackConfig,
     WecomConfig,
     XiaoYiConfig,
     WeChatConfig,
@@ -2122,6 +2424,13 @@ def load_agent_config(  # pylint: disable=too-many-branches,too-many-statements
         except Exception:
             pass
 
+        # Pre-validate MCP clients: skip invalid ones so a
+        # single misconfigured MCP client does not prevent the
+        # entire agent from loading.
+        from .utils import sanitize_mcp_clients
+
+        sanitize_mcp_clients(data, agent_id)
+
         agent_config = AgentProfileConfig(**data)
 
         # Cache the config with its mtime
@@ -2331,9 +2640,13 @@ def migrate_legacy_config_to_multi_agent() -> bool:
 def get_model_max_input_length(
     agent_config: "AgentProfileConfig",
 ) -> int:
-    """Return ``max_input_length`` from the active model's ``ModelInfo``.
+    """Return the active model's resolved context window.
 
-    Falls back to 128 * 1024 (131072) if model info is unavailable.
+    Delegates to ``Provider.get_context_size`` — the SAME resolution the
+    compaction trigger uses (explicit ``max_input_length`` > static
+    context-window catalog > 128k default) — so /history, usage%%, and
+    daemon status can never disagree with when compression actually fires.
+    Falls back to 128 * 1024 (131072) if the provider is unavailable.
     Accepts an already-loaded *agent_config* to avoid redundant file I/O
     on hot paths (pre_reasoning, compact_context, summarize, etc.).
     """
@@ -2353,9 +2666,7 @@ def get_model_max_input_length(
             manager = ProviderManager.get_instance()
             provider = manager.get_provider(model_slot.provider_id)
             if provider:
-                model_info = provider.get_model_info(model_slot.model)
-                if model_info is not None:
-                    return model_info.max_input_length
+                return provider.get_context_size(model_slot.model)
         except Exception:
             pass
     logger.debug(

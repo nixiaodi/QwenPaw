@@ -37,6 +37,7 @@ export const DEFAULT_FORM_VALUES = {
     share_session: true,
     max_concurrency: 1,
     timeout_seconds: 120,
-    misfire_grace_seconds: 60,
+    misfire_grace_seconds: 600,
+    tool_safety: false,
   },
 };

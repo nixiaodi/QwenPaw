@@ -28,9 +28,14 @@ import SidebarSettingsPanel from "./SidebarSettingsPanel";
 import { clearAuthToken } from "../api/config";
 import { authApi } from "../api/modules/auth";
 import api from "../api";
+import {
+  syncSessionsGlobal,
+  type ExtendedSession,
+} from "../stores/sessionListStore";
 import { useCodingMode } from "../stores/codingModeStore";
 import { useSidebarModeStore } from "../stores/sidebarModeStore";
 import { buildSessionPath, getSessionIdFromPath } from "../utils/sessionRoute";
+import sessionApi from "../pages/Chat/sessionApi";
 import styles from "./index.module.less";
 import { useTheme } from "../contexts/ThemeContext";
 import { useMenuItems, useRoutes } from "../plugins/registry/hooks";
@@ -120,7 +125,9 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
   const [accountModalOpen, setAccountModalOpen] = useState(false);
   const [accountLoading, setAccountLoading] = useState(false);
   const [accountForm] = Form.useForm();
-  const [collapsed, setCollapsed] = useState(false);
+  // Start collapsed on mobile so the first paint does not overlay/obscure
+  // the main content on narrow viewports.
+  const [collapsed, setCollapsed] = useState(isMobileSidebarViewport);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [isMobile, setIsMobile] = useState(isMobileSidebarViewport);
   const [hasInboxUnread, setHasInboxUnread] = useState(false);
@@ -178,9 +185,9 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
     const mediaQuery = window.matchMedia(MOBILE_SIDEBAR_QUERY);
     const syncMobileSidebar = () => {
       setIsMobile(mediaQuery.matches);
-      if (mediaQuery.matches) {
-        setCollapsed(true);
-      }
+      // Collapse on mobile to avoid covering the main content; expand again
+      // when the viewport returns to desktop width.
+      setCollapsed(mediaQuery.matches);
     };
 
     syncMobileSidebar();
@@ -213,6 +220,33 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
       void loadUnreadState();
     }, INBOX_BADGE_POLLING_MS);
     return () => window.clearInterval(timer);
+  }, []);
+
+  // ── Pre-fetch sessions on mount ───────────────────────────────────────────
+  // On mobile the sidebar starts collapsed so SidebarSessionList is unmounted
+  // and never fetches.  When the user expands the sidebar the list mounts fresh
+  // but the Zustand store may still be empty (ChatSessionInitializer may not
+  // have synced yet).  Proactively fetch sessions into the store so the data
+  // is ready the moment the user expands.  Fire on mount regardless of
+  // sidebar mode (the default "full" mode also benefits from this).
+  // Uses sessionApi.getSessionList() instead of raw api.listChats() to ensure
+  // the same data processing pipeline (dedup, realId, generating state) as
+  // the desktop ChatSessionDrawer.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const list = await sessionApi.getSessionList();
+        if (!cancelled && list.length > 0) {
+          syncSessionsGlobal(list as ExtendedSession[]);
+        }
+      } catch {
+        // Best-effort: let SidebarSessionList retry on its own.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   // ── Adapter: convert MenuItem trees to antd, with inbox badge decoration.
@@ -309,18 +343,22 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
     if (onChatPage) {
       window.dispatchEvent(new CustomEvent("qwenpaw:sidebar-new-chat"));
     } else {
-      navigate("/chat");
+      sessionStorage.setItem("qwenpaw_pending_new_chat", "1");
+      const mode = codingMode ? "coding" : "chat";
+      navigate(`/${mode}`);
     }
-  }, [location.pathname, navigate]);
+  }, [location.pathname, navigate, codingMode]);
 
   /**
    * Session click: navigate directly without relying on ChatSessionInitializer.
    * buildSessionPath handles coding-mode paths.
+   * Resolve realId (backend UUID) to avoid exposing local timestamp in URL.
    */
   const handleSidebarSessionClick = useCallback(
     (sessionId: string) => {
       const mode = codingMode ? "coding" : "chat";
-      const targetPath = buildSessionPath(mode, sessionId);
+      const effectiveId = sessionApi.getEffectiveSessionId(sessionId);
+      const targetPath = buildSessionPath(mode, effectiveId);
       navigate(targetPath);
     },
     [codingMode, navigate],
@@ -388,7 +426,9 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
   // `renderIcon` retained for tree-shaking awareness.
   void renderIcon;
 
-  const isSimpleExpanded = sidebarMode === "simple" && !collapsed;
+  // On mobile, the expanded sidebar shows sessions (like simple mode) instead
+  // of the full menu — matching the desktop history panel UX.
+  const isSimpleExpanded = (sidebarMode === "simple" || isMobile) && !collapsed;
 
   return (
     <Sider

@@ -4,42 +4,39 @@ It provides a unified interface to manage providers, such as listing available
 providers, adding/removing custom providers, and fetching provider details."""
 
 import asyncio
+import json
+import logging
 import os
 from typing import Dict, List
-import logging
-import json
-
-from pydantic import BaseModel
 
 from agentscope.model import ChatModelBase
-from agentscope_runtime.engine.schemas.exception import (
-    ModelNotFoundException,
-)
+from pydantic import BaseModel
 
-from ..constant import SECRET_DIR
+from qwenpaw.exceptions import ModelNotFoundException
+
 from ..config.config import ModelSlotConfig
+from ..constant import SECRET_DIR
 from ..exceptions import ProviderError
-from .anthropic_provider import AnthropicProvider
-from .gemini_provider import GeminiProvider
-from .ollama_provider import OllamaProvider
-from .openai_provider import (
-    OpenAIProvider,
-    OpenCodeProvider,
-    KiloProvider,
-)
-from .lmstudio_provider import LMStudioProvider
-from .provider import (
-    ModelInfo,
-    Provider,
-    ProviderInfo,
-)
-from .openrouter_provider import OpenRouterProvider
 from ..security.secret_store import (
     PROVIDER_SECRET_FIELDS,
     decrypt_dict_fields,
     encrypt_dict_fields,
     is_encrypted,
 )
+from .anthropic_provider import AnthropicProvider
+from .dashscope_provider import DashScopeProvider
+from .gemini_provider import GeminiProvider
+from .lmstudio_provider import LMStudioProvider
+from .ollama_provider import OllamaProvider
+from .openai_provider import (
+    GitHubModelsProvider,
+    KiloProvider,
+    OpenAIProvider,
+    OpenCodeProvider,
+)
+from .openai_response_provider import OpenAIResponseProvider
+from .openrouter_provider import OpenRouterProvider
+from .provider import ModelInfo, Provider, ProviderInfo
 
 logger = logging.getLogger(__name__)
 
@@ -66,25 +63,53 @@ MODELSCOPE_MODELS: List[ModelInfo] = [
 
 DASHSCOPE_MODELS: List[ModelInfo] = [
     ModelInfo(
-        id="qwen3-max",
-        name="Qwen3 Max",
+        id="qwen3.7-max",
+        name="Qwen3.7 Max",
         supports_image=False,
         supports_video=False,
         probe_source="documentation",
+        thinking_enabled=True,
+        relay_reasoning=False,
     ),
     ModelInfo(
-        id="qwen3-235b-a22b-thinking-2507",
-        name="Qwen3 235B A22B Thinking",
-        supports_image=False,
-        supports_video=False,
+        id="qwen3.7-plus",
+        name="Qwen3.7 Plus",
+        supports_image=True,
+        supports_video=True,
         probe_source="documentation",
+        thinking_enabled=True,
+        relay_reasoning=False,
     ),
     ModelInfo(
-        id="deepseek-v3.2",
-        name="DeepSeek-V3.2",
+        id="qwen3.6-plus",
+        name="Qwen3.6 Plus",
+        supports_image=True,
+        supports_video=True,
+        probe_source="documentation",
+        thinking_enabled=True,
+        relay_reasoning=False,
+    ),
+    ModelInfo(
+        id="deepseek-v4-pro",
+        name="DeepSeek-V4 Pro",
         supports_image=False,
         supports_video=False,
         probe_source="documentation",
+        thinking_enabled=True,
+        thinking_param_style="effort",
+        reasoning_effort_options=["high", "max"],
+        relay_reasoning=False,
+    ),
+    ModelInfo(
+        id="glm-5.2",
+        name="GLM-5.2",
+        supports_image=False,
+        supports_video=False,
+        probe_source="documentation",
+        thinking_enabled=True,
+        thinking_param_style="effort",
+        reasoning_effort_options=["high", "max"],
+        relay_reasoning=False,
     ),
 ]
 
@@ -107,10 +132,66 @@ MIMO_TOKENPLAN_MODELS: List[ModelInfo] = [
 
 ALIYUN_TOKENPLAN_MODELS: List[ModelInfo] = [
     ModelInfo(
+        id="qwen3.7-plus",
+        name="Qwen3.7 Plus",
+        supports_image=True,
+        supports_video=True,
+        probe_source="documentation",
+    ),
+    ModelInfo(
+        id="qwen3.7-max",
+        name="Qwen3.7 Max",
+        supports_image=False,
+        supports_video=False,
+        probe_source="documentation",
+    ),
+    ModelInfo(
         id="qwen3.6-plus",
         name="Qwen3.6 Plus",
         supports_image=True,
         supports_video=True,
+        probe_source="documentation",
+    ),
+    ModelInfo(
+        id="qwen3.6-flash",
+        name="Qwen3.6 Flash",
+        supports_image=True,
+        supports_video=True,
+        probe_source="documentation",
+    ),
+    ModelInfo(
+        id="deepseek-v4-pro",
+        name="DeepSeek-V4 Pro",
+        supports_image=False,
+        supports_video=False,
+        probe_source="documentation",
+    ),
+    ModelInfo(
+        id="deepseek-v4-flash",
+        name="DeepSeek-V4 Flash",
+        supports_image=False,
+        supports_video=False,
+        probe_source="documentation",
+    ),
+    ModelInfo(
+        id="deepseek-v3.2",
+        name="DeepSeek-V3.2",
+        supports_image=False,
+        supports_video=False,
+        probe_source="documentation",
+    ),
+    ModelInfo(
+        id="glm-5.2",
+        name="GLM-5.2",
+        supports_image=False,
+        supports_video=False,
+        probe_source="documentation",
+    ),
+    ModelInfo(
+        id="glm-5.1",
+        name="GLM-5.1",
+        supports_image=False,
+        supports_video=False,
         probe_source="documentation",
     ),
     ModelInfo(
@@ -128,10 +209,10 @@ ALIYUN_TOKENPLAN_MODELS: List[ModelInfo] = [
         probe_source="documentation",
     ),
     ModelInfo(
-        id="deepseek-v3.2",
-        name="DeepSeek-V3.2",
-        supports_image=False,
-        supports_video=False,
+        id="kimi-k2.6",
+        name="Kimi K2.6",
+        supports_image=True,
+        supports_video=True,
         probe_source="documentation",
     ),
     ModelInfo(
@@ -156,6 +237,20 @@ ALIYUN_CODINGPLAN_MODELS: List[ModelInfo] = [
         name="Qwen3.5 Plus",
         supports_image=True,
         supports_video=True,
+        probe_source="documentation",
+    ),
+    ModelInfo(
+        id="glm-5.2",
+        name="GLM-5.2",
+        supports_image=False,
+        supports_video=False,
+        probe_source="documentation",
+    ),
+    ModelInfo(
+        id="glm-5.1",
+        name="GLM-5.1",
+        supports_image=False,
+        supports_video=False,
         probe_source="documentation",
     ),
     ModelInfo(
@@ -221,6 +316,13 @@ ZHIPU_MODELS: List[ModelInfo] = [
     ModelInfo(
         id="glm-5",
         name="glm-5",
+        supports_image=False,
+        supports_video=False,
+        probe_source="documentation",
+    ),
+    ModelInfo(
+        id="glm-5.2",
+        name="glm-5.2",
         supports_image=False,
         supports_video=False,
         probe_source="documentation",
@@ -790,7 +892,7 @@ PROVIDER_MODELSCOPE = OpenAIProvider(
     freeze_url=True,
 )
 
-PROVIDER_DASHSCOPE = OpenAIProvider(
+PROVIDER_DASHSCOPE = DashScopeProvider(
     id="dashscope",
     name="DashScope",
     base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
@@ -940,6 +1042,16 @@ PROVIDER_OPENAI = OpenAIProvider(
     name="OpenAI",
     base_url="https://api.openai.com/v1",
     api_key_prefix="sk-",
+    models=OPENAI_MODELS,
+    freeze_url=True,
+)
+
+PROVIDER_OPENAI_RESPONSE = OpenAIResponseProvider(
+    id="openai-response",
+    name="OpenAI (Response API)",
+    base_url="https://api.openai.com/v1",
+    api_key_prefix="sk-",
+    chat_model="OpenAIResponseModel",
     models=OPENAI_MODELS,
     freeze_url=True,
 )
@@ -1108,7 +1220,7 @@ PROVIDER_OPENROUTER = OpenRouterProvider(
 
 GITHUB_MODELS_MODELS: List[ModelInfo] = [
     ModelInfo(
-        id="gpt-4o-mini",
+        id="openai/gpt-4o-mini",
         name="GPT-4o Mini",
         supports_image=True,
         supports_video=False,
@@ -1116,38 +1228,23 @@ GITHUB_MODELS_MODELS: List[ModelInfo] = [
         is_free=True,
     ),
     ModelInfo(
-        id="gpt-4o",
+        id="openai/gpt-4o",
         name="GPT-4o",
         supports_image=True,
         supports_video=False,
         probe_source="documentation",
         is_free=True,
     ),
-    ModelInfo(
-        id="Meta-Llama-3.1-405B-Instruct",
-        name="Llama 3.1 405B",
-        supports_image=False,
-        supports_video=False,
-        probe_source="documentation",
-        is_free=True,
-    ),
-    ModelInfo(
-        id="Meta-Llama-3.1-8B-Instruct",
-        name="Llama 3.1 8B",
-        supports_image=False,
-        supports_video=False,
-        probe_source="documentation",
-        is_free=True,
-    ),
 ]
 
-PROVIDER_GITHUB_MODELS = OpenAIProvider(
+PROVIDER_GITHUB_MODELS = GitHubModelsProvider(
     id="github-models",
     name="GitHub Models",
-    base_url="https://models.inference.ai.azure.com",
+    base_url="https://models.github.ai/inference",
     api_key_prefix="ghp_",
+    api_key_prefixes=["ghp_", "github_pat_"],
     models=GITHUB_MODELS_MODELS,
-    freeze_url=True,
+    freeze_url=False,
     meta={
         "is_free_tier": True,
     },
@@ -1289,6 +1386,7 @@ class ProviderManager:  # pylint: disable=too-many-public-methods
         self._add_builtin(PROVIDER_OPENCODE)
         self._add_builtin(PROVIDER_KILO)
         self._add_builtin(PROVIDER_OPENAI)
+        self._add_builtin(PROVIDER_OPENAI_RESPONSE)
         self._add_builtin(PROVIDER_AZURE_OPENAI)
         self._add_builtin(PROVIDER_ANTHROPIC)
         self._add_builtin(PROVIDER_GEMINI)
@@ -1559,6 +1657,20 @@ class ProviderManager:  # pylint: disable=too-many-public-methods
                 result.get("supports_image"),
                 result.get("supports_video"),
             )
+            # Heal a poisoned ``rejects_media`` cache entry: if the
+            # probe actually saw the image, force ``rejects_media`` to
+            # False so subsequent ``_reasoning`` calls stop stripping
+            # media.  Without this, a stale entry written from an
+            # unrelated 400 (request too large, malformed block fields)
+            # would silently drop every future image.
+            if result.get("supports_image"):
+                from .model_capability_cache import get_capability_cache
+
+                get_capability_cache().learn(
+                    f"{provider_id}:{model_id}",
+                    "rejects_media",
+                    False,
+                )
         except Exception as e:
             logger.warning("Auto-probe multimodal failed: %s", e)
 
@@ -1874,6 +1986,7 @@ class ProviderManager:  # pylint: disable=too-many-public-methods
                 return True
         return False
 
+    # pylint: disable=too-many-return-statements
     def _provider_from_data(self, data: Dict) -> Provider:
         """Deserialize provider data to a concrete provider type."""
         provider_id = str(data.get("id", ""))
@@ -1885,8 +1998,12 @@ class ProviderManager:  # pylint: disable=too-many-public-methods
             return AnthropicProvider.model_validate(data)
         if provider_id == "gemini" or chat_model == "GeminiChatModel":
             return GeminiProvider.model_validate(data)
+        if provider_id == "dashscope" or chat_model == "DashScopeChatModel":
+            return DashScopeProvider.model_validate(data)
         if provider_id == "ollama":
             return OllamaProvider.model_validate(data)
+        if chat_model == "OpenAIResponseModel":
+            return OpenAIResponseProvider.model_validate(data)
         return OpenAIProvider.model_validate(data)
 
     def save_active_model(self, active_model: ModelSlotConfig):
@@ -2078,6 +2195,12 @@ class ProviderManager:  # pylint: disable=too-many-public-methods
                     builtin.auth_mode = provider.auth_mode
                 if provider.custom_headers:
                     builtin.custom_headers = provider.custom_headers
+                # Restore the configurable inline-media cap for the providers
+                # that support it (currently DashScope).
+                if hasattr(builtin, "max_inline_media_bytes"):
+                    builtin.max_inline_media_bytes = (
+                        provider.max_inline_media_bytes
+                    )
                 builtin_model_ids = {m.id for m in builtin.models}
                 builtin.extra_models = [
                     m
@@ -2090,21 +2213,24 @@ class ProviderManager:  # pylint: disable=too-many-public-methods
                 # extra_models (models that were user-added but are now
                 # part of the built-in list).
                 stored_model_config: dict = {}
+                _per_model_keys = (
+                    "generate_kwargs",
+                    "max_tokens",
+                    "max_input_length",
+                    "relay_reasoning",
+                    "thinking_enabled",
+                    "thinking_budget",
+                    "reasoning_effort",
+                )
                 for m in provider.models:
                     stored_model_config[m.id] = {
-                        "generate_kwargs": m.generate_kwargs,
-                        "max_tokens": m.max_tokens,
-                        "max_input_length": m.max_input_length,
+                        k: getattr(m, k) for k in _per_model_keys
                     }
                 for m in provider.extra_models:
                     if m.id in builtin_model_ids:
                         stored_model_config.setdefault(
                             m.id,
-                            {
-                                "generate_kwargs": m.generate_kwargs,
-                                "max_tokens": m.max_tokens,
-                                "max_input_length": m.max_input_length,
-                            },
+                            {k: getattr(m, k) for k in _per_model_keys},
                         )
                 if stored_model_config:
                     for model in builtin.models:
@@ -2117,6 +2243,18 @@ class ProviderManager:  # pylint: disable=too-many-public-methods
                             if cfg["max_input_length"] is not None:
                                 model.max_input_length = cfg[
                                     "max_input_length"
+                                ]
+                            if cfg.get("relay_reasoning") is not None:
+                                model.relay_reasoning = cfg["relay_reasoning"]
+                            if cfg.get("thinking_enabled") is not None:
+                                model.thinking_enabled = cfg[
+                                    "thinking_enabled"
+                                ]
+                            if cfg.get("thinking_budget") is not None:
+                                model.thinking_budget = cfg["thinking_budget"]
+                            if cfg.get("reasoning_effort") is not None:
+                                model.reasoning_effort = cfg[
+                                    "reasoning_effort"
                                 ]
         # Load custom providers
         for provider_file in self.custom_path.glob("*.json"):

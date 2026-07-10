@@ -16,8 +16,9 @@ from .mcp import router as mcp_router
 from .mcp_oauth import router as mcp_oauth_router
 from .tools import router as tools_router
 from ..crons.api import router as cron_router
-from ..runner.api import router as runner_router
+from ..chats.api import router as runner_router
 from .console import router as console_router
+from .fork import router as fork_router
 from .token_usage import router as token_usage_router
 from .agent_stats import router as agent_stats_router
 from .auth import router as auth_router
@@ -31,7 +32,6 @@ from .plan import router as plan_router
 from .user_input import router as user_input_router
 from .runtime_status import router as runtime_status_router
 from .slash import router as slash_router
-from .fork import router as fork_router
 from .git import router as git_router
 from .coding_project import router as coding_project_router
 from .access_control import router as access_control_router
@@ -42,6 +42,7 @@ router = APIRouter()
 router.include_router(agents_router)
 router.include_router(config_router)
 router.include_router(console_router)
+router.include_router(fork_router)
 router.include_router(cron_router)
 router.include_router(local_models_router)
 router.include_router(mcp_oauth_router)
@@ -67,7 +68,6 @@ router.include_router(plan_router)
 router.include_router(user_input_router)
 router.include_router(runtime_status_router)
 router.include_router(slash_router)
-router.include_router(fork_router)
 router.include_router(git_router)
 router.include_router(coding_project_router)
 router.include_router(access_control_router)

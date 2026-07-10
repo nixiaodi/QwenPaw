@@ -703,6 +703,15 @@ export function JobDrawer({
         </Form.Item>
 
         <Form.Item
+          name={["runtime", "tool_safety"]}
+          label={t("cronJobs.runtimeToolSafety")}
+          valuePropName="checked"
+          tooltip={t("cronJobs.toolSafetyTooltip")}
+        >
+          <Switch />
+        </Form.Item>
+
+        <Form.Item
           name={["runtime", "max_concurrency"]}
           label={t("cronJobs.runtimeMaxConcurrency")}
           tooltip={t("cronJobs.maxConcurrencyTooltip")}
@@ -723,7 +732,7 @@ export function JobDrawer({
           label={t("cronJobs.runtimeMisfireGraceSeconds")}
           tooltip={t("cronJobs.misfireGraceSecondsTooltip")}
         >
-          <InputNumber min={0} style={{ width: "100%" }} placeholder="60" />
+          <InputNumber min={0} style={{ width: "100%" }} placeholder="600" />
         </Form.Item>
       </Form>
     </Drawer>

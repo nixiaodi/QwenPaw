@@ -19,7 +19,7 @@ from ..config.context import (
     get_current_workspace_dir,
 )
 from ..constant import WORKING_DIR
-from .skills_manager import (
+from .skill_system import (
     ensure_skills_initialized,
     get_workspace_skills_dir,
     resolve_effective_skills,

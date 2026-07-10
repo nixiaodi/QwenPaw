@@ -15,6 +15,7 @@ import json
 from unittest.mock import MagicMock
 
 from qwenpaw.agents.utils.tool_message_utils import (
+    _coerce_tool_inputs_to_json,
     _dedup_tool_blocks,
     _remove_invalid_tool_blocks,
     _repair_empty_tool_inputs,
@@ -257,7 +258,10 @@ class TestRepairEmptyToolInputs:
             ],
         )
         result = _repair_empty_tool_inputs([msg])
-        assert result[0].content[0]["input"] == {"key": "value"}
+        # _repair_empty_tool_inputs now stores the repaired value as a JSON
+        # string (consistent with ToolCallBlock.input being str) rather than
+        # the parsed dict, so downstream formatters receive valid JSON.
+        assert result[0].content[0]["input"] == json.dumps({"key": "value"})
 
     def test_skips_repair_when_input_already_set(self):
         msg = _msg(
@@ -319,10 +323,164 @@ class TestRepairEmptyToolInputs:
         result = _repair_empty_tool_inputs([msg])
         assert result[0].content[0]["input"] == {}
 
+    def test_recovers_raw_input_with_trailing_garbage(self):
+        msg = _msg(
+            [
+                {
+                    "type": "tool_use",
+                    "id": "id1",
+                    "name": "t",
+                    "input": {},
+                    "raw_input": '{"key": "value"}trailing garbage',
+                },
+            ],
+        )
+        result = _repair_empty_tool_inputs([msg])
+        assert json.loads(result[0].content[0]["input"]) == {"key": "value"}
+
+    def test_recovers_raw_input_with_leading_whitespace_and_trailing_garbage(
+        self,
+    ):
+        msg = _msg(
+            [
+                {
+                    "type": "tool_use",
+                    "id": "id1",
+                    "name": "t",
+                    "input": {},
+                    "raw_input": '\n  {"path": "README.md"}trailing garbage',
+                },
+            ],
+        )
+        result = _repair_empty_tool_inputs([msg])
+        assert json.loads(result[0].content[0]["input"]) == {
+            "path": "README.md",
+        }
+
+    def test_non_dict_raw_decode_does_not_repair(self):
+        """raw_decode recovering a non-dict should not overwrite input."""
+        msg = _msg(
+            [
+                {
+                    "type": "tool_use",
+                    "id": "id1",
+                    "name": "t",
+                    "input": {},
+                    "raw_input": "42trailing",
+                },
+            ],
+        )
+        result = _repair_empty_tool_inputs([msg])
+        assert result[0].content[0]["input"] == {}
+
     def test_returns_original_when_no_change(self):
         msgs = [_msg([_tool_use("id1")])]
         result = _repair_empty_tool_inputs(msgs)
         assert result is msgs
+
+
+# ---------------------------------------------------------------------------
+# _coerce_tool_inputs_to_json — raw_decode recovery
+# ---------------------------------------------------------------------------
+
+
+class TestCoerceToolInputsRawDecode:
+    """raw_decode recovery for no-param tool calls with trailing garbage."""
+
+    def test_valid_json_unchanged(self):
+        msg = _msg(
+            [
+                {
+                    "type": "tool_use",
+                    "id": "id1",
+                    "name": "t",
+                    "input": '{"x": 1}',
+                },
+            ],
+        )
+        result = _coerce_tool_inputs_to_json([msg])
+        assert result[0].content[0]["input"] == '{"x": 1}'
+
+    def test_empty_braces_with_trailing_garbage_recovered(self):
+        msg = _msg(
+            [
+                {
+                    "type": "tool_use",
+                    "id": "id1",
+                    "name": "t",
+                    "input": "{}some trailing junk",
+                },
+            ],
+        )
+        result = _coerce_tool_inputs_to_json([msg])
+        assert len(result[0].content) == 1
+        assert json.loads(result[0].content[0]["input"]) == {}
+
+    def test_object_with_trailing_garbage_recovered(self):
+        msg = _msg(
+            [
+                {
+                    "type": "tool_use",
+                    "id": "id1",
+                    "name": "t",
+                    "input": '{"key": "val"}extra',
+                },
+            ],
+        )
+        result = _coerce_tool_inputs_to_json([msg])
+        assert len(result[0].content) == 1
+        assert json.loads(result[0].content[0]["input"]) == {"key": "val"}
+
+    def test_object_with_leading_whitespace_and_trailing_garbage_recovered(
+        self,
+    ):
+        msg = _msg(
+            [
+                {
+                    "type": "tool_use",
+                    "id": "id1",
+                    "name": "t",
+                    "input": '\n  {"path": "README.md"}extra',
+                },
+            ],
+        )
+        result = _coerce_tool_inputs_to_json([msg])
+        assert len(result[0].content) == 1
+        assert json.loads(result[0].content[0]["input"]) == {
+            "path": "README.md",
+        }
+
+    def test_completely_invalid_json_drops_block(self):
+        msg = _msg(
+            [
+                {
+                    "type": "tool_use",
+                    "id": "id1",
+                    "name": "t",
+                    "input": "totally not json at all",
+                },
+            ],
+        )
+        result = _coerce_tool_inputs_to_json([msg])
+        assert len(result[0].content) == 0
+
+    def test_non_dict_recovered_value_drops_block(self):
+        """raw_decode recovering a non-dict (int, list, string) should drop."""
+        for bad_input in ["42trailing", '"hello"garbage', "[1,2,3]extra"]:
+            msg = _msg(
+                [
+                    {
+                        "type": "tool_use",
+                        "id": "id1",
+                        "name": "t",
+                        "input": bad_input,
+                    },
+                ],
+            )
+            result = _coerce_tool_inputs_to_json([msg])
+            assert (
+                len(result[0].content) == 0
+            ), f"Expected block to be dropped for input: {bad_input!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -400,3 +558,33 @@ class TestSanitizeToolMessages:
     def test_empty_messages_returns_empty(self):
         result = _sanitize_tool_messages([])
         assert result == []
+
+    def test_self_paired_message_kept_when_another_block_unpaired(self):
+        # An AgentScope 2.0 self-paired assistant message carries its own
+        # tool_use and matching tool_result (plus text). When an *unrelated*
+        # unpaired tool_use elsewhere triggers sanitation, the valid
+        # self-paired turn must NOT be dropped (previously it was silently
+        # removed, losing the text and leaving an unpaired tool_use).
+        self_paired = _msg(
+            [
+                {"type": "text", "text": "keep me"},
+                _tool_use("paired"),
+                _tool_result("paired"),
+            ],
+        )
+        msgs = [
+            _msg([_tool_use("orphan")]),  # unpaired -> triggers sanitation
+            self_paired,
+            _msg("regular message"),
+        ]
+
+        result = _sanitize_tool_messages(msgs)
+
+        assert self_paired in result, "self-paired message must be preserved"
+        # The unpaired orphan tool_use is still removed.
+        remaining_uses: set = set()
+        for m in result:
+            u, _ = extract_tool_ids(m)
+            remaining_uses |= u
+        assert "orphan" not in remaining_uses
+        assert "paired" in remaining_uses

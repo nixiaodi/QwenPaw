@@ -11,6 +11,7 @@ from agentscope.tool import ToolResponse
 from pydantic import ValidationError
 
 from ...config.context import get_current_request_context
+from ...runtime.tool_registry import tool_descriptor
 from ...user_input.schemas import UserInputQuestion
 from ...user_input.service import get_user_input_service
 
@@ -112,6 +113,7 @@ def _normalize_question(item: dict[str, Any], index: int) -> dict[str, Any]:
     }
 
 
+@tool_descriptor(async_execution=True)
 async def ask_user_input(
     questions: list[dict[str, Any]] | None = None,
     title: str | None = None,

@@ -13,16 +13,17 @@ from ..inbox_trace_store import (
     read_session_messages,
 )
 from .models import CronJobSpec
+from ...security.tool_guard.execution_level import ToolExecutionLevel
 
 logger = logging.getLogger(__name__)
 
 
 class CronExecutor:
-    def __init__(self, *, runner: Any, channel_manager: Any):
-        self._runner = runner
+    def __init__(self, *, workspace: Any, channel_manager: Any):
+        self._workspace = workspace
         self._channel_manager = channel_manager
 
-    # pylint: disable=too-many-statements
+    # pylint: disable=too-many-statements,too-many-branches
     async def execute(self, job: CronJobSpec) -> dict[str, Any]:
         """Execute one job once.
 
@@ -98,6 +99,11 @@ class CronExecutor:
         )
         request_context["source"] = "cron"
         request_context["cron_job_id"] = job.id or ""
+        request_context["approval_level"] = (
+            ToolExecutionLevel.AUTO.value
+            if job.runtime.tool_safety
+            else ToolExecutionLevel.OFF.value
+        )
         req["request_context"] = request_context
 
         # Determine session_id based on share_session
@@ -114,9 +120,28 @@ class CronExecutor:
             )
             req["session_source"] = "cron"
 
+        # Register a ChatSpec so the session appears in the frontend list.
+        chat_manager = getattr(self._workspace, "chat_manager", None)
+        _chat_spec = None
+        if chat_manager is not None:
+            try:
+                _chat_spec = await chat_manager.get_or_create_chat(
+                    session_id=req["session_id"],
+                    user_id=req.get("user_id", "cron"),
+                    channel=target_channel,
+                    name=job.name or f"Cron: {job.id}",
+                    source="cron",
+                )
+            except Exception:
+                logger.debug(
+                    "cron: failed to register chat spec for job %s",
+                    job.id,
+                    exc_info=True,
+                )
+
         delivery_error: str | None = None
         baseline_messages = await read_session_messages(
-            runner=self._runner,
+            runner=self._workspace,
             session_id=req["session_id"],
             user_id=req["user_id"],
             channel=target_channel,
@@ -138,7 +163,7 @@ class CronExecutor:
 
         async def _run() -> None:
             nonlocal delivery_error
-            async for event in self._runner.stream_query(req):
+            async for event in self._workspace.stream_query(req):
                 try:
                     await self._channel_manager.send_event(
                         channel=target_channel,
@@ -165,7 +190,7 @@ class CronExecutor:
             )
             await append_trace_from_session_delta(
                 run_id=run_id,
-                runner=self._runner,
+                runner=self._workspace,
                 session_id=req["session_id"],
                 user_id=req["user_id"],
                 channel=target_channel,
@@ -186,7 +211,7 @@ class CronExecutor:
             )
             await append_trace_from_session_delta(
                 run_id=run_id,
-                runner=self._runner,
+                runner=self._workspace,
                 session_id=req["session_id"],
                 user_id=req["user_id"],
                 channel=target_channel,
@@ -202,7 +227,7 @@ class CronExecutor:
             logger.info("cron execute: job_id=%s cancelled", job.id)
             await append_trace_from_session_delta(
                 run_id=run_id,
-                runner=self._runner,
+                runner=self._workspace,
                 session_id=req["session_id"],
                 user_id=req["user_id"],
                 channel=target_channel,
@@ -217,7 +242,7 @@ class CronExecutor:
         except Exception as e:  # pylint: disable=broad-except
             await append_trace_from_session_delta(
                 run_id=run_id,
-                runner=self._runner,
+                runner=self._workspace,
                 session_id=req["session_id"],
                 user_id=req["user_id"],
                 channel=target_channel,
@@ -229,3 +254,13 @@ class CronExecutor:
                 error=repr(e),
             )
             raise
+        finally:
+            if _chat_spec is not None and chat_manager is not None:
+                try:
+                    await chat_manager.touch_chat(_chat_spec.id)
+                except Exception:
+                    logger.debug(
+                        "cron: failed to touch chat for job %s",
+                        job.id,
+                        exc_info=True,
+                    )

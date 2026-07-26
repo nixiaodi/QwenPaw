@@ -9,7 +9,19 @@
     "github": "GitHub",
     "githubComingSoon": "Coming Soon",
     "lang": "中文",
-    "agentscopeTeam": "AgentScope"
+    "platform": "Platform",
+    "platformTitle": "AgentScope Platform",
+    "agentscopeTeam": "AgentScope",
+    "communityBenefits": "Benefits",
+    "communityBenefitsNew": "NEW",
+    "benefit1Title": "ModelStudio: 100M free tokens",
+    "benefit1Desc": "Check your free quota",
+    "benefit2Title": "Token rebate",
+    "benefit2Desc": "Up to ¥200 back",
+    "benefit3Title": "Up to ¥1M tokens",
+    "benefit3Desc": "OPC innovation subsidy",
+    "benefit4Title": "Student subsidy",
+    "benefit4Desc": "¥50 credit · win iPhone 17"
   },
   "hero": {
     "titleleft": "Your Personal",
@@ -19,7 +31,8 @@
     "sub1": "and TUI — all upgraded, all yours.",
     "releaseNote": "QwenPaw {{version}} is released",
     "cta": "Read the docs",
-    "quickStart": "Quick Start"
+    "quickStart": "Quick Start",
+    "quickTry": "Try Now"
   },
   "follow": {
     "title": "Follow us",
@@ -261,7 +274,12 @@
     "sessionCount": "{{count}} developer day sessions",
     "backToList": "Back to blog",
     "notFound": "Post not found",
-    "empty": "No blog posts yet"
+    "empty": "No blog posts yet",
+    "views": "{{count}} views",
+    "viewsLabel": "Views",
+    "likes": "{{count}}",
+    "like": "Like",
+    "unlike": "Unlike"
   },
   "docs": {
     "intro": "Introduction",

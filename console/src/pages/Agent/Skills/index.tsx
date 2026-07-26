@@ -96,12 +96,20 @@ function SkillsPage() {
     });
   }, [setSearchParams]);
 
+  const handleMarketInstalled = useCallback(() => {
+    void refreshSkills();
+  }, [refreshSkills]);
+
   // Split skills into enabled and disabled groups
   const { enabledSkills, disabledSkills } = useMemo(() => {
     const enabled = visibleSkills.filter((skill) => skill.enabled);
     const disabled = visibleSkills.filter((skill) => !skill.enabled);
     return { enabledSkills: enabled, disabledSkills: disabled };
   }, [visibleSkills]);
+  const enabledSkillCount = useMemo(
+    () => sortedSkills.filter((skill) => skill.enabled).length,
+    [sortedSkills],
+  );
 
   // Shared renderer for SkillListItem (used by both enabled and disabled sections)
   const renderSkillListItem = useCallback(
@@ -146,7 +154,10 @@ function SkillsPage() {
             </Button>
           }
         />
-        <MarketPanel installTarget="workspace" />
+        <MarketPanel
+          installTarget="workspace"
+          onInstalled={handleMarketInstalled}
+        />
       </div>
     );
   }
@@ -244,7 +255,7 @@ function SkillsPage() {
                 <span className={styles.panelDotGreen} />
                 {t("skills.enabledSkills")}
                 <span className={styles.panelCount}>
-                  {enabledSkills.length} {t("skills.active")}
+                  {enabledSkillCount} {t("skills.active")}
                 </span>
               </div>
 
@@ -317,7 +328,12 @@ function SkillsPage() {
             </div>
           )}
 
-          {hasMore && <div ref={sentinelRef} style={{ height: 1 }} />}
+          {hasMore && (
+            <div
+              ref={sentinelRef}
+              style={{ height: 1, minHeight: 1, flexShrink: 0 }}
+            />
+          )}
         </>
       )}
 

@@ -9,7 +9,6 @@ Example:
     >>> model, formatter = create_model_and_formatter()
 """
 
-
 import base64
 import logging
 import os
@@ -47,14 +46,32 @@ from ..token_usage import TokenRecordingModelWrapper
 
 
 def _file_url_to_path(url: str) -> str:
+    """Convert a file:// URI to a local filesystem path.
+
+    Handles Windows drive letters, UNC authority, and
+    percent-encoded characters.  Non-file:// URLs are
+    returned with only percent-decoding applied.
+
+    Examples:
+        file:///C:/path       -> C:/path
+        file:///tmp/path      -> /tmp/path
+        file://server/share/x -> //server/share/x  (UNC)
     """
-    Strip file:// to path. On Windows file:///C:/path -> C:/path not /C:/path.
-    Percent-decodes the path so non-ASCII filenames resolve correctly.
-    """
-    s = url.removeprefix("file://")
-    # Windows: file:///C:/path yields "/C:/path"; remove leading slash.
+    if not url.startswith("file://"):
+        return unquote(url)
+    s = url[7:]  # strip "file://"
+    # Strip localhost authority: localhost/path -> /path
+    if s.startswith("localhost/"):
+        s = s[9:]  # len("localhost") == 9
+    # Windows drive letter: /C:/path -> C:/path (three-slash form)
     if len(s) >= 3 and s.startswith("/") and s[1].isalpha() and s[2] == ":":
         s = s[1:]
+    # Windows drive letter: C:/path (two-slash form file://C:/...)
+    elif len(s) >= 2 and s[0].isalpha() and s[1] == ":":
+        pass  # already correct
+    elif not s.startswith("/"):
+        # UNC authority form: server/share/x -> //server/share/x
+        s = f"//{s}"
     return unquote(s)
 
 
@@ -629,10 +646,11 @@ _MEDIA_BLOCK_TYPES = ("image", "audio", "video")
 # message survives formatting.
 _SURVIVOR_BLOCK_TYPES = frozenset({"text", "tool_use", "tool_call"})
 
-# Block types the base formatter silently skips.  A message consisting
-# entirely of these (plus any ``DataBlock`` with unsupported media)
-# will be discarded.  Used by ``_is_block_dropped_by_formatter``
-# to predict which assistant messages vanish from the formatted output.
+# Block types that do not contribute content to an assistant wire message.
+# Thinking and file blocks are skipped, while a hint becomes a separate user
+# message. A source segment consisting entirely of these (plus any
+# ``DataBlock`` with unsupported media) emits no assistant message. Used by
+# ``_is_block_dropped_by_formatter`` to predict assistant-message survival.
 #
 # ``file`` is kept for completeness but is effectively dead code:
 # ``_fixup_media_list`` converts file blocks to ``TextBlock`` before
@@ -644,18 +662,17 @@ def _is_block_dropped_by_formatter(
     block: Any,
     formatter: "FormatterBase",
 ) -> bool:
-    """Predict whether the base formatter silently skips *block*.
+    """Predict whether *block* is absent from assistant wire content.
 
     The base ``OpenAIChatFormatter.format()`` only adds a block to
     ``content_blocks`` (text, DataBlock with supported media) or
-    ``tool_calls`` (ToolCallBlock).  Everything else — ThinkingBlock,
-    HintBlock, unknown types, and DataBlock with unsupported media — is
-    skipped.  If **all** blocks in an assistant message are skipped, the
-    message itself is discarded (see ``_openai_formatter.py:360``).
+    ``tool_calls`` (ToolCallBlock). ThinkingBlock, unknown types, and
+    unsupported DataBlock values are skipped. HintBlock is emitted as a
+    separate user message, so it does not keep an assistant segment alive.
 
     This function returns ``True`` when a block is predicted to be
-    skipped, enabling ``aligned_reasoning`` to correctly predict message
-    drops and stay in sync with the formatted output.  #5858
+    absent from assistant content, enabling ``aligned_reasoning`` to predict
+    message drops and stay in sync with the formatted output.  #5858
     """
     btype = (
         block.get("type")
@@ -691,6 +708,51 @@ def _is_block_dropped_by_formatter(
 
     # Unknown block type — the base formatter logs a warning and skips.
     return True
+
+
+def _reasoning_by_assistant_segment(
+    blocks: list[Any],
+    formatter: "FormatterBase",
+) -> list[str | None]:
+    """Align thinking content with emitted assistant wire messages.
+
+    OpenAI-family formatters flush the current assistant message before each
+    tool result or hint. AgentScope can keep several reasoning/tool cycles in
+    one assistant ``Msg``, so each resulting wire segment must receive only
+    the thinking blocks that belong to that segment.
+    """
+
+    def _get(block: Any, key: str, default: Any = None) -> Any:
+        if isinstance(block, dict):
+            return block.get(key, default)
+        return getattr(block, key, default)
+
+    aligned: list[str | None] = []
+    reasoning_parts: list[str] = []
+    segment_survives = False
+
+    for block in blocks:
+        block_type = _get(block, "type")
+        if block_type == "thinking":
+            thinking = _get(block, "thinking", "")
+            if thinking:
+                reasoning_parts.append(thinking)
+            continue
+
+        if block_type in ("tool_result", "hint"):
+            if segment_survives:
+                aligned.append("\n".join(reasoning_parts) or None)
+            reasoning_parts = []
+            segment_survives = False
+            continue
+
+        if not _is_block_dropped_by_formatter(block, formatter):
+            segment_survives = True
+
+    if segment_survives:
+        aligned.append("\n".join(reasoning_parts) or None)
+
+    return aligned
 
 
 # pylint: disable=too-many-branches
@@ -769,8 +831,8 @@ def _fixup_media_list(items: list) -> None:
                             f" — file deleted from disk]"
                         ),
                     )
-                elif unquote(url_str) != url_str:
-                    source.url = unquote(url_str)
+                else:
+                    source.url = local_path
         elif btype == "file":
             if isinstance(block, dict):
                 source = block.get("source") or {}
@@ -914,7 +976,7 @@ def _create_file_block_support_formatter(
                 self,
             )
 
-            reasoning_contents = {}
+            has_reasoning = False
             extra_contents: dict[str, Any] = {}
             for msg in normalized_msgs:
                 if msg.role != "assistant":
@@ -923,8 +985,7 @@ def _create_file_block_support_formatter(
                     if _battr(block, "type") == "thinking":
                         thinking = _battr(block, "thinking", "")
                         if thinking:
-                            reasoning_contents[id(msg)] = thinking
-                        break
+                            has_reasoning = True
                 for block in msg.content or []:
                     btype = _battr(block, "type")
                     if btype in ("tool_use", "tool_call"):
@@ -979,7 +1040,7 @@ def _create_file_block_support_formatter(
                             tc["extra_content"] = ec
 
             if (
-                reasoning_contents
+                has_reasoning
                 and not is_anthropic_formatter
                 and not _is_response_formatter
                 and getattr(
@@ -995,40 +1056,8 @@ def _create_file_block_support_formatter(
                     blocks = (
                         list(m.content) if isinstance(m.content, list) else []
                     )
-                    types = [_battr(b, "type") for b in blocks]
-                    # Drop prediction: a message is discarded when
-                    # *every* block is skipped by the base formatter
-                    # (thinking, hint, file, DataBlock with unsupported
-                    # media, unknown types).  See #5858.
-                    is_dropped_by_formatter = bool(blocks) and all(
-                        _is_block_dropped_by_formatter(b, self) for b in blocks
-                    )
-                    if is_dropped_by_formatter:
-                        continue
-                    # Split prediction: DashScope / OpenAI-family
-                    # formatters produce one assistant wire msg per
-                    # "segment" — where tool_result blocks act as
-                    # separators (they become role="tool" messages).
-                    # Each contiguous run of text/tool_call between
-                    # tool_results becomes one assistant message.
-                    non_thinking = [t for t in types if t != "thinking"]
-                    segments = 0
-                    in_segment = False
-                    for bt in non_thinking:
-                        if bt == "tool_result":
-                            in_segment = False
-                        else:
-                            if not in_segment:
-                                segments += 1
-                                in_segment = True
-                    # Within a segment, text+tool_call still counts as
-                    # one wire msg (content + tool_calls merged).  But
-                    # if a segment has text ONLY or tool_call ONLY,
-                    # that's also 1.  The only extra split is text that
-                    # follows tool_calls (rare in model output).
-                    wire_count = max(segments, 1)
                     aligned_reasoning.extend(
-                        [reasoning_contents.get(id(m))] * wire_count,
+                        _reasoning_by_assistant_segment(blocks, self),
                     )
 
                 out_assistant = [
@@ -1047,21 +1076,22 @@ def _create_file_block_support_formatter(
                         len(aligned_reasoning),
                         len(out_assistant),
                     )
-                    for _i, m in enumerate(
-                        msg
-                        for msg in normalized_msgs
-                        if msg.role == "assistant"
-                    ):
-                        types = (
-                            [_battr(b, "type") for b in m.content]
-                            if isinstance(m.content, list)
-                            else []
-                        )
-                        logger.warning(
-                            "  src assistant[%d] blocks=%s",
-                            _i,
-                            types,
-                        )
+                    if logger.isEnabledFor(logging.DEBUG):
+                        for _i, m in enumerate(
+                            msg
+                            for msg in normalized_msgs
+                            if msg.role == "assistant"
+                        ):
+                            types = (
+                                [_battr(b, "type") for b in m.content]
+                                if isinstance(m.content, list)
+                                else []
+                            )
+                            logger.debug(
+                                "  src assistant[%d] blocks=%s",
+                                _i,
+                                types,
+                            )
                 else:
                     for i, out_msg in enumerate(out_assistant):
                         if aligned_reasoning[i]:
@@ -1153,8 +1183,48 @@ def _strip_top_level_message_name(
     return messages
 
 
+def _resolve_model_slot_override(model_slot_override: Any):
+    """Parse an optional per-request model override into a model slot."""
+    from ..config.config import ModelSlotConfig
+
+    slot = None
+    if isinstance(model_slot_override, ModelSlotConfig):
+        slot = model_slot_override
+    if isinstance(model_slot_override, dict):
+        try:
+            slot = ModelSlotConfig.model_validate(model_slot_override)
+        except Exception:
+            logger.warning(
+                "Ignoring invalid model_slot_override dict: %r",
+                model_slot_override,
+            )
+    if isinstance(model_slot_override, str):
+        # Use partition so version-tagged model names can contain ':'.
+        provider_id, sep, model_name = model_slot_override.partition(":")
+        if sep and provider_id.strip() and model_name.strip():
+            slot = ModelSlotConfig(
+                provider_id=provider_id.strip(),
+                model=model_name.strip(),
+            )
+        else:
+            logger.warning(
+                "Ignoring invalid model_slot_override string: %r",
+                model_slot_override,
+            )
+    if model_slot_override is not None and not isinstance(
+        model_slot_override,
+        (ModelSlotConfig, dict, str),
+    ):
+        logger.warning(
+            "Unsupported model_slot_override type: %s",
+            type(model_slot_override).__name__,
+        )
+    return slot
+
+
 def create_model_and_formatter(
     agent_id: Optional[str] = None,
+    model_slot_override: Any = None,
 ) -> Tuple[ChatModelBase, FormatterBase]:
     """Factory method to create model and formatter instances.
 
@@ -1164,6 +1234,12 @@ def create_model_and_formatter(
     Args:
         agent_id: Optional agent ID to load agent-specific model config.
             If None, tries to get from context, then falls back to global.
+        model_slot_override: Optional per-request model override. When
+            provided, it takes precedence over the agent's persisted
+            ``active_model``. Accepts a ``ModelSlotConfig``, a dict matching
+            its schema, or a string of the form ``"<provider_id>:<model>"``.
+            The model name itself may contain ``:`` (e.g. version tags);
+            only the first ``:`` is treated as the separator.
 
     Returns:
         Tuple of (model_instance, formatter_instance)
@@ -1211,6 +1287,10 @@ def create_model_and_formatter(
                 compact_threshold = ccc.compact_threshold_ratio
         except Exception:
             pass
+
+    slot = _resolve_model_slot_override(model_slot_override)
+    if slot is not None and slot.provider_id and slot.model:
+        model_slot = slot
 
     # Create chat model from agent-specific or global config
     if model_slot and model_slot.provider_id and model_slot.model:

@@ -113,7 +113,13 @@ def _normalize_question(item: dict[str, Any], index: int) -> dict[str, Any]:
     }
 
 
-@tool_descriptor(async_execution=True)
+@tool_descriptor(
+    async_execution=True,
+    tool_type="internal",
+    policy_name="AskUserInput",
+    ui_description="Ask the user a structured clarification question",
+    ui_icon="❔",
+)
 async def ask_user_input(
     questions: list[dict[str, Any]] | None = None,
     title: str | None = None,

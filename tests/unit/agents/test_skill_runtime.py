@@ -213,7 +213,7 @@ def test_load_skill_rejects_disabled_skill(tmp_path):
     set_current_channel_name("console")
 
     response = asyncio.run(load_skill("imagegen", "画小猫"))
-    text = response.content[0].get("text", "")
+    text = response.content[0].text
 
     assert "not enabled" in text
 
@@ -224,7 +224,7 @@ def test_load_skill_includes_skill_relative_runtime_context(tmp_path):
     set_current_channel_name("console")
 
     response = asyncio.run(load_skill("imagegen", "画小猫"))
-    payload = json.loads(response.content[0].get("text", ""))
+    payload = json.loads(response.content[0].text)
 
     assert payload["skill_dir"].endswith("imagegen")
     assert "Relative paths in SKILL.md are resolved from skill_dir" in payload[

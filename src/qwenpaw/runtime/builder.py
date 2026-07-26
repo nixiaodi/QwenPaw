@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from ..agents.acp.meta import ACP_CODING_PROJECT_META_KEY
+from ..utils.io_utils import run_sync_io
 
 _logger = logging.getLogger(__name__)
 
@@ -38,7 +39,7 @@ class AgentBuilder:
         agent_config: Any,
         *,
         agent_id: str | None = None,
-        request_context: dict[str, str] | None = None,
+        request_context: dict[str, Any] | None = None,
         active_modes: Iterable[str] | None = None,
         effective_skills: Iterable[str] | None = None,
         enabled_features: Iterable[str] | None = None,
@@ -72,7 +73,12 @@ class AgentBuilder:
             tools = []
 
         if extra_tools:
-            tools.extend(extra_tools)
+            tools.extend(
+                self._filter_extra_tools_for_subagent(
+                    extra_tools,
+                    request_context,
+                ),
+            )
 
         if memory_tools:
             from ..governance import PolicyGuardedTool
@@ -86,12 +92,59 @@ class AgentBuilder:
                     ),
                 )
 
+        # Final pass: cover workspace + extras + memory in one filter.
+        tools = self.apply_subagent_tool_whitelist(tools, request_context)
+
         skill_dirs = self._resolve_skill_loader_dirs(
             effective_skills,
             workspace_dir,
         )
 
         return Toolkit(tools=tools, skills_or_loaders=skill_dirs)
+
+    @staticmethod
+    def _tool_name(tool: Any) -> str:
+        """Best-effort tool name for whitelist filtering."""
+        name = getattr(tool, "name", None)
+        if isinstance(name, str) and name:
+            return name
+        fn = getattr(tool, "func", None) or getattr(tool, "_func", None)
+        if callable(fn):
+            return getattr(fn, "__name__", "") or ""
+        return getattr(tool, "__name__", "") or ""
+
+    @classmethod
+    def apply_subagent_tool_whitelist(
+        cls,
+        tools: Iterable[Any],
+        request_context: dict[str, Any] | None,
+    ) -> list[Any]:
+        """Filter *tools* by ``subagent_allowed_tools`` (final-pass API).
+
+        - ``None`` / non-list → inherit (no filter)
+        - ``[]`` → deny all tools
+        - non-empty list → keep only matching python tool names
+        """
+        items = list(tools)
+        whitelist = (request_context or {}).get("subagent_allowed_tools")
+        if not isinstance(whitelist, list):
+            return items
+        if not whitelist:
+            return []
+        allow = set(whitelist)
+        return [t for t in items if cls._tool_name(t) in allow]
+
+    @classmethod
+    def _filter_extra_tools_for_subagent(
+        cls,
+        extra_tools: Iterable[Any],
+        request_context: dict[str, Any] | None,
+    ) -> list[Any]:
+        """Apply ``subagent_allowed_tools`` to post-list_tools extras."""
+        return cls.apply_subagent_tool_whitelist(
+            extra_tools,
+            request_context,
+        )
 
     @staticmethod
     def _resolve_skill_loader_dirs(
@@ -122,7 +175,7 @@ class AgentBuilder:
 
     # ----------------------------------------------------------------- build
 
-    async def build(  # pylint: disable=too-many-statements
+    async def build(  # pylint: disable=too-many-statements,too-many-branches
         self,
         ctx: Any,
     ) -> Any:
@@ -175,6 +228,11 @@ class AgentBuilder:
         except Exception:
             effective_skills = []
 
+        subagent_skills = request_context.get("subagent_skills")
+        if isinstance(subagent_skills, list):
+            parent_set = set(effective_skills)
+            effective_skills = [s for s in subagent_skills if s in parent_set]
+
         # Compute active modes.
         active_modes: set[str] = set()
         workspace = getattr(ctx, "workspace", None)
@@ -190,7 +248,11 @@ class AgentBuilder:
             if _cm and getattr(_cm, "project_dir", None)
             else None
         )
-        governor = self._init_governor(workspace_dir, _project_dir)
+        governor = await run_sync_io(
+            self._init_governor,
+            workspace_dir,
+            _project_dir,
+        )
 
         # Inject governor into local_workspace so list_tools() can
         # wrap tools with PolicyGuardedTool.
@@ -220,7 +282,11 @@ class AgentBuilder:
 
         # Model + formatter (built before the toolkit so the scroll context
         # strategy, which needs the model for token counting, can wire in).
-        model, _formatter = self.build_model(agent_config)
+        model_slot_override = getattr(ctx.request, "model_slot_override", None)
+        model, _formatter = self.build_model(
+            agent_config,
+            model_slot_override=model_slot_override,
+        )
 
         # Built once and shared: the agent's native offloader, and (when
         # ``offload_dialog`` is on) scroll's optional dialog archive.
@@ -275,12 +341,10 @@ class AgentBuilder:
         sys_prompt = self.build_prompt(ctx, agent_config)
 
         middlewares = self._build_middlewares(ctx, agent_config)
-        if scroll is not None:
-            middlewares.append(scroll.cap_middleware)
 
         running_config = agent_config.running
 
-        from ..loop.react_gates import (
+        from ..modes.default import (
             resolve_max_iterations,
         )
 
@@ -305,14 +369,6 @@ class AgentBuilder:
             effective_skills=effective_skills,
             governor=governor,
         )
-
-        # Register default ReAct gates (StopHandler).
-        if workspace is not None:
-            from ..loop.react_gates import (
-                register_react_gates,
-            )
-
-            register_react_gates(workspace, running_config)
 
         # Load session state if SessionLoadHook populated it.
         if ctx.session_state:
@@ -373,12 +429,17 @@ class AgentBuilder:
 
         return build_default_prompt_manager().build_sync(prompt_ctx)
 
-    def build_model(self, agent_config: Any) -> tuple[Any, Any]:
+    def build_model(
+        self,
+        agent_config: Any,
+        model_slot_override: Any = None,
+    ) -> tuple[Any, Any]:
         """Create model and formatter using the factory method."""
         from ..agents.model_factory import create_model_and_formatter
 
         model, formatter = create_model_and_formatter(
             agent_id=agent_config.id,
+            model_slot_override=model_slot_override,
         )
         if formatter is not None:
             innermost = model
@@ -446,6 +507,9 @@ class AgentBuilder:
             "root_session_id": getattr(ctx, "root_session_id", "") or "",
             "root_agent_id": getattr(ctx, "root_agent_id", "") or "",
         }
+        _ws = getattr(ctx, "workspace_dir", None)
+        if _ws is not None:
+            rc.setdefault("workspace_dir", str(_ws))
         app_services = getattr(ctx, "app_services", None)
         if app_services is not None:
             rc["approval_coordinator"] = getattr(
@@ -483,10 +547,44 @@ class AgentBuilder:
         agent_config: Any,
         request_context: dict[str, Any],
     ) -> Any:
-        """Enable Coding Mode for this request when ACP supplies a project."""
+        """Enable Coding Mode when ACP or fork worktree supplies a project."""
+        from ..agents.fork_project import resolve_allowed_fork_project_dir
+
         raw_project_dir = request_context.get(ACP_CODING_PROJECT_META_KEY)
+        fork_raw = request_context.get("fork_project_dir")
+        if not isinstance(raw_project_dir, str) or not raw_project_dir.strip():
+            # spawn_subagent(fork=True) places the worktree here.
+            raw_project_dir = fork_raw
         if not isinstance(raw_project_dir, str) or not raw_project_dir.strip():
             return agent_config
+
+        # When fork_project_dir is present, the final coding project MUST be
+        # the validated worktree — never fall through to an unchecked ACP path.
+        if isinstance(fork_raw, str) and fork_raw.strip():
+            existing_cm = getattr(agent_config, "coding_mode", None)
+            existing_pd = (
+                getattr(existing_cm, "project_dir", None)
+                if existing_cm and getattr(existing_cm, "enabled", False)
+                else None
+            )
+            workspace_hint = request_context.get("workspace_dir") or getattr(
+                agent_config,
+                "workspace_dir",
+                None,
+            )
+            validated = resolve_allowed_fork_project_dir(
+                fork_raw,
+                workspace_dir=workspace_hint,
+                coding_project_dir=existing_pd,
+            )
+            if validated is None:
+                _logger.warning(
+                    "Rejecting fork_project_dir outside allowed worktree "
+                    "subtree: %s",
+                    fork_raw,
+                )
+                return agent_config
+            raw_project_dir = str(validated)
 
         project_dir = Path(raw_project_dir).expanduser().resolve()
         if not project_dir.is_dir():
@@ -533,6 +631,22 @@ class AgentBuilder:
             and getattr(_cm, "project_dir", None)
             else None
         )
+        # Prefer validated fork worktree as the shell/file working_dir.
+        request = getattr(ctx, "request", None)
+        _payload = (
+            getattr(request, "request_context", None) if request else None
+        )
+        if isinstance(_payload, dict):
+            from ..agents.fork_project import resolve_allowed_fork_project_dir
+
+            _fork = resolve_allowed_fork_project_dir(
+                _payload.get("fork_project_dir"),
+                workspace_dir=workspace_dir,
+                coding_project_dir=_project_dir,
+            )
+            if _fork is not None:
+                ws = str(_fork)
+                _project_dir = str(_fork)
         _configured_shell = getattr(
             getattr(agent_config, "running", None),
             "shell_command_executable",
@@ -543,7 +657,6 @@ class AgentBuilder:
             or os.environ.get("SHELL")
             or ("cmd.exe" if sys.platform == "win32" else "/bin/sh")
         )
-        request = getattr(ctx, "request", None)
         _active = getattr(agent_config, "active_model", None)
         _model_name = (
             _active.model
@@ -623,9 +736,23 @@ class AgentBuilder:
         try:
             lcc = agent_config.running.light_context_config
             ccc = lcc.context_compact_config
+            trc = lcc.tool_result_pruning_config
+            # ToolResultPruningMiddleware already bounds fresh results by
+            # bytes and persists the full artifact before replacing them.
+            # AgentScope otherwise applies its own 50k-token split afterwards,
+            # creates a replacement ToolResultBlock, and drops QwenPaw's
+            # block-scoped truncation metadata.  Make that second cap
+            # non-binding while unified pruning is enabled; when pruning is
+            # disabled, retain AgentScope's default safety net.
+            tool_result_limit = (
+                2**63 - 1
+                if trc.enabled
+                else ContextConfig.model_fields["tool_result_limit"].default
+            )
             return ContextConfig(
                 trigger_ratio=ccc.compact_threshold_ratio,
                 reserve_ratio=ccc.reserve_threshold_ratio,
+                tool_result_limit=tool_result_limit,
             )
         except Exception:
             return ContextConfig()
@@ -707,9 +834,10 @@ class AgentBuilder:
         offered to the model in this build.
 
         The REPL runs model-authored Python and so needs a sandbox. It is
-        worth registering only when one is actually available — meaning the
-        governor is present AND its platform probe found a sandbox — or when
-        the operator explicitly opted into unsandboxed recall (both the
+        worth registering only when one is actually usable — meaning the
+        governor's platform probe found a sandbox AND the global sandbox
+        switch is enabled — or when the operator explicitly opted into
+        unsandboxed recall (both the
         ``QWENPAW_ALLOW_UNSANDBOXED_RECALL`` env var and
         ``scroll_config.allow_unsandboxed``, via
         ``scroll_unsandboxed_allowed``).
@@ -721,13 +849,27 @@ class AgentBuilder:
         tool, which needs no sandbox. This is narrower than
         :meth:`_scroll_recall_runnable`, which gates whether scroll is wired at
         all; here scroll is already wired and structured recall is present.
+
+        Note: this is a build-time decision. Registration is evaluated once
+        when the agent is built; toggling ``security.sandbox_enabled`` at
+        runtime does NOT add or remove the REPL from an already-running
+        agent. The switch is still honoured on the execution path
+        (``_prepare_off_mode_sandbox`` / ``_sandbox_usable``) -- an already
+        registered REPL will simply skip sandbox provisioning once the switch
+        is off. Rebuild the agent to change which tools are offered.
         """
-        if governor is not None and getattr(
-            governor,
-            "sandbox_available",
-            False,
-        ):
-            return True
+        if governor is not None:
+            sandbox_usable = getattr(governor, "sandbox_usable", None)
+            if sandbox_usable is None:
+                # Compatibility for lightweight/custom governor objects that
+                # predate the effective-usability property.
+                sandbox_usable = getattr(
+                    governor,
+                    "sandbox_available",
+                    False,
+                )
+            if sandbox_usable:
+                return True
         try:
             from ..agents.context import scroll_unsandboxed_allowed
 
@@ -778,9 +920,10 @@ class AgentBuilder:
             )
         else:
             _logger.info(
-                "scroll: no sandbox available for recall_history_python — "
-                "registering only the structured recall_history tool "
-                "(no approval prompt, works without a sandbox)",
+                "scroll: sandbox unavailable or disabled for "
+                "recall_history_python — registering only the structured "
+                "recall_history tool (no approval prompt, works without a "
+                "sandbox)",
             )
 
     @staticmethod
@@ -833,19 +976,76 @@ class AgentBuilder:
         )
 
     @staticmethod
-    def _build_middlewares(  # pylint: disable=too-many-statements
+    def _build_tool_result_pruning_middleware(
+        ctx: Any,
+        agent_config: Any,
+    ) -> Any:
+        """Build the tool-result pruning middleware."""
+        import os
+
+        from ..agents.middlewares import ToolResultPruningMiddleware
+
+        lcc = agent_config.running.light_context_config
+        trc = lcc.tool_result_pruning_config
+        workspace = getattr(ctx, "workspace", None)
+        workspace_dir = (
+            str(getattr(workspace, "workspace_dir", ""))
+            if workspace is not None
+            else ""
+        )
+        tool_results_dir = (
+            os.path.join(workspace_dir, trc.tool_results_cache)
+            if workspace_dir
+            else ""
+        )
+
+        return ToolResultPruningMiddleware(
+            enabled=trc.enabled,
+            recent_n=trc.pruning_recent_n,
+            old_max_bytes=(
+                trc.pruning_recent_msg_max_bytes
+                if getattr(lcc, "strategy", "native") == "scroll"
+                else trc.pruning_old_msg_max_bytes
+            ),
+            recent_max_bytes=trc.pruning_recent_msg_max_bytes,
+            exempt_file_extensions={
+                e.lower() for e in trc.exempt_file_extensions
+            },
+            exempt_tool_names={n.lower() for n in trc.exempt_tool_names},
+            tool_results_dir=tool_results_dir,
+            agent_id=getattr(agent_config, "id", "default"),
+        )
+
+    # pylint: disable=too-many-statements,too-many-branches
+    @staticmethod
+    def _build_middlewares(
         ctx: Any,
         agent_config: Any,
     ) -> list[Any]:
         """Build middleware list.
 
         Order (onion model, outermost first):
-        1. ToolCoordinatorMiddleware — tool call lifecycle management
-        2. ToolResultPruningMiddleware — tiered tool result pruning
+        1. ToolResultPruningMiddleware — tiered tool result pruning
+        2. ToolCoordinatorMiddleware — tool call lifecycle management
         3. Plugin-registered middlewares (sorted by priority)
         """
         mws: list[Any] = []
 
+        pruning_middleware = None
+        try:
+            pruning_middleware = (
+                AgentBuilder._build_tool_result_pruning_middleware(
+                    ctx,
+                    agent_config,
+                )
+            )
+        except Exception:
+            _logger.debug(
+                "ToolResultPruningMiddleware not created",
+                exc_info=True,
+            )
+
+        tool_coordinator = None
         app_services = getattr(ctx, "app_services", None)
         if app_services is not None:
             tool_coordinator = getattr(
@@ -854,43 +1054,18 @@ class AgentBuilder:
                 None,
             )
             if tool_coordinator is not None:
-                from ..tool_calls import (
-                    ToolCoordinatorMiddleware,
-                    ToolResultLimiter,
-                )
+                from ..tool_calls import ToolCoordinatorMiddleware
 
-                result_limiter = None
-                try:
-                    import os
-
-                    lcc = agent_config.running.light_context_config
-                    trc = lcc.tool_result_pruning_config
-                    workspace = getattr(ctx, "workspace", None)
-                    workspace_dir = (
-                        str(getattr(workspace, "workspace_dir", ""))
-                        if workspace is not None
-                        else ""
-                    )
-                    tool_results_dir = (
-                        os.path.join(workspace_dir, trc.tool_results_cache)
-                        if workspace_dir
-                        else None
-                    )
-                    result_limiter = ToolResultLimiter(
-                        enabled=trc.enabled,
-                        max_text_bytes=trc.execution_layer_max_bytes,
-                        cache_dir=tool_results_dir,
-                    )
-                except Exception:
-                    _logger.debug(
-                        "ToolResultLimiter not created",
-                        exc_info=True,
-                    )
-
+                if pruning_middleware is not None:
+                    mws.append(pruning_middleware)
                 mws.append(
                     ToolCoordinatorMiddleware(
                         coordinator=tool_coordinator,
-                        result_limiter=result_limiter,
+                        background_result_processor=(
+                            pruning_middleware.prune_tool_response_async
+                            if pruning_middleware is not None
+                            else None
+                        ),
                     ),
                 )
 
@@ -907,48 +1082,8 @@ class AgentBuilder:
             except Exception:
                 _logger.debug("Memory middlewares not created", exc_info=True)
 
-        # Tiered tool-result pruning (ported from LightContextManager)
-        try:
-            import os
-
-            from ..agents.middlewares import ToolResultPruningMiddleware
-
-            lcc = agent_config.running.light_context_config
-            trc = lcc.tool_result_pruning_config
-
-            workspace = getattr(ctx, "workspace", None)
-            workspace_dir = (
-                str(getattr(workspace, "workspace_dir", ""))
-                if workspace is not None
-                else ""
-            )
-            tool_results_dir = (
-                os.path.join(workspace_dir, trc.tool_results_cache)
-                if workspace_dir
-                else ""
-            )
-
-            mws.append(
-                ToolResultPruningMiddleware(
-                    enabled=trc.enabled,
-                    recent_n=trc.pruning_recent_n,
-                    old_max_bytes=trc.pruning_old_msg_max_bytes,
-                    recent_max_bytes=trc.pruning_recent_msg_max_bytes,
-                    exempt_file_extensions={
-                        e.lower() for e in trc.exempt_file_extensions
-                    },
-                    exempt_tool_names={
-                        n.lower() for n in trc.exempt_tool_names
-                    },
-                    tool_results_dir=tool_results_dir,
-                    agent_id=getattr(agent_config, "id", "default"),
-                ),
-            )
-        except Exception:
-            _logger.debug(
-                "ToolResultPruningMiddleware not created",
-                exc_info=True,
-            )
+        if tool_coordinator is None and pruning_middleware is not None:
+            mws.append(pruning_middleware)
 
         # Langfuse tool observability
         try:

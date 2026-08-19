@@ -27,6 +27,9 @@ from ..utils.startup_display import AgentStartupDisplay
 
 logger = logging.getLogger(__name__)
 
+_OLD_WORKSPACE_TASK_WAIT_SECONDS = 60.0
+_OLD_WORKSPACE_TASK_MAX_WAIT_ROUNDS = 24 * 60
+
 
 class MultiAgentManager:
     """Manages multiple agent workspaces.
@@ -63,6 +66,10 @@ class MultiAgentManager:
         Overridden by WorkspaceRegistry.
         """
         return Workspace(agent_id=agent_id, workspace_dir=workspace_dir)
+
+    def get_loaded_agent(self, agent_id: str) -> Workspace | None:
+        """Return an already loaded workspace without starting it."""
+        return self.agents.get(agent_id)
 
     async def get_agent(self, agent_id: str) -> Workspace:
         """Get agent workspace by ID (lazy loading with dedup).
@@ -233,6 +240,7 @@ class MultiAgentManager:
         self,
         old_instance: Workspace,
         agent_id: str,
+        active_tasks: dict[str, asyncio.Future] | None = None,
     ) -> None:
         """Gracefully stop old instance after checking for active tasks.
 
@@ -242,36 +250,54 @@ class MultiAgentManager:
         Args:
             old_instance: The old workspace instance to stop
             agent_id: Agent ID for logging
+            active_tasks: Fixed snapshot of tasks owned by the old workspace.
+                When omitted, the method captures the snapshot itself.
         """
-        has_active = await old_instance.task_tracker.has_active_tasks()
+        if active_tasks is None:
+            active_tasks = (
+                await old_instance.task_tracker.snapshot_active_tasks(
+                    owner=old_instance,
+                )
+            )
 
-        if has_active:
+        if active_tasks:
             # Active tasks - schedule delayed cleanup in background
-            active_tasks = await old_instance.task_tracker.list_active_tasks()
             logger.info(
                 f"Old workspace instance has {len(active_tasks)} active "
-                f"task(s): {active_tasks}. Scheduling delayed cleanup for "
+                f"task(s): {list(active_tasks)}. "
+                f"Scheduling delayed cleanup for "
                 f"{agent_id}.",
             )
 
             async def delayed_cleanup():
                 """Wait for tasks to complete, then stop old instance."""
                 try:
-                    # Wait up to 1 minutes for tasks to complete
-                    completed = await old_instance.task_tracker.wait_all_done(
-                        timeout=60.0,
-                    )
+                    completed = False
+                    for _ in range(_OLD_WORKSPACE_TASK_MAX_WAIT_ROUNDS):
+                        completed = (
+                            await old_instance.task_tracker.wait_tasks_done(
+                                list(active_tasks.values()),
+                                timeout=_OLD_WORKSPACE_TASK_WAIT_SECONDS,
+                            )
+                        )
+                        if completed:
+                            break
+                        logger.warning(
+                            f"Tasks are still active for old instance "
+                            f"{agent_id}. Keeping it alive until they finish.",
+                        )
+
                     if completed:
                         logger.info(
                             f"All tasks completed for old instance "
                             f"{agent_id}. Stopping now.",
                         )
                     else:
-                        logger.warning(
-                            f"Timeout waiting for tasks to complete for "
-                            f"{agent_id}. Forcing stop after 5 minutes.",
+                        logger.error(
+                            f"Tasks did not finish within 24 hours for old "
+                            f"instance {agent_id}. Forcing cleanup to prevent "
+                            f"a resource leak.",
                         )
-
                     await old_instance.stop(final=False)
                     logger.info(
                         f"Old workspace instance stopped: {agent_id}. "
@@ -348,6 +374,30 @@ class MultiAgentManager:
             ] = AgentStartupStatus.DISABLED
             logger.info(f"Agent stopped and removed: {agent_id}")
             return True
+
+    @staticmethod
+    def _mark_rejected_reusable_services_for_cleanup(
+        old_instance: Workspace,
+        new_instance: Workspace,
+        reusable: dict,
+    ) -> None:
+        """Ensure services rejected by the new workspace are later closed."""
+        if not reusable:
+            return
+
+        # pylint: disable=protected-access
+        accepted_reusable = new_instance._service_manager.reused_services
+        rejected_reusable = set(reusable) - accepted_reusable
+        for service_name in rejected_reusable:
+            descriptor = old_instance._service_manager.descriptors.get(
+                service_name,
+            )
+            if descriptor is not None:
+                descriptor.reusable = False
+            old_instance._service_manager.reused_services.discard(
+                service_name,
+            )
+        # pylint: enable=protected-access
 
     async def reload_agent(self, agent_id: str) -> bool:
         """Reload a specific agent instance with zero-downtime.
@@ -426,7 +476,13 @@ class MultiAgentManager:
         async with self._lock:
             old_instance = self.agents.get(agent_id)
 
+        reusable = {}
         if old_instance:
+            # TaskTracker is agent-scoped rather than workspace-scoped. Reuse
+            # it before startup so reconnect/status/stop requests arriving
+            # after the atomic swap can still reach in-flight runs.
+            new_instance.set_task_tracker(old_instance.task_tracker)
+
             # Get all reusable services from old instance's ServiceManager
             # pylint: disable=protected-access
             reusable = old_instance._service_manager.get_reusable_services()
@@ -472,9 +528,32 @@ class MultiAgentManager:
             self.agents[agent_id] = new_instance
             logger.info(f"Workspace instance replaced: {agent_id}")
 
+        # A reusable service can be rejected during startup when its class no
+        # longer matches the newly loaded configuration (for example, after a
+        # memory backend switch).  The old workspace must retain it for any
+        # in-flight requests, but it must not treat it as transferred forever
+        # or its eventual non-final shutdown would leak the old service.
+        self._mark_rejected_reusable_services_for_cleanup(
+            old_instance,
+            new_instance,
+            reusable,
+        )
+
+        # Snapshot only runs owned by the old workspace. Runs started through
+        # the new workspace after the swap must not delay old resource cleanup.
+        old_active_tasks = (
+            await old_instance.task_tracker.snapshot_active_tasks(
+                owner=old_instance,
+            )
+        )
+
         # Step 5: Gracefully stop old instance (outside lock)
         # Delegates to helper method to avoid too-many-statements
-        await self._graceful_stop_old_instance(old_instance, agent_id)
+        await self._graceful_stop_old_instance(
+            old_instance,
+            agent_id,
+            active_tasks=old_active_tasks,
+        )
 
         return True
 

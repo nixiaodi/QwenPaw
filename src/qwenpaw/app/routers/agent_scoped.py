@@ -85,6 +85,7 @@ def create_agent_scoped_router() -> APIRouter:
     from .user_input import router as user_input_router
     from .runtime_status import router as runtime_status_router
     from .slash import router as slash_router
+    from .checkpoints import router as checkpoints_router
 
     router = APIRouter(prefix="/agents/{agentId}", tags=["agent-scoped"])
 
@@ -112,5 +113,6 @@ def create_agent_scoped_router() -> APIRouter:
     router.include_router(user_input_router)
     router.include_router(runtime_status_router)
     router.include_router(slash_router)
+    router.include_router(checkpoints_router)
 
     return router

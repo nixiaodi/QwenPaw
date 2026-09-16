@@ -106,6 +106,7 @@ class AgentBuilder:
         """
         from agentscope.tool import Toolkit
 
+        effective_skills = list(effective_skills or ())
         local_ws = self._get_local_workspace(ctx) if ctx else None
         if local_ws is not None:
             tools: list[Any] = await local_ws.list_tools(
@@ -113,7 +114,7 @@ class AgentBuilder:
                 agent_id=agent_id,
                 request_context=request_context,
                 active_modes=active_modes or (),
-                active_skills=effective_skills or (),
+                active_skills=effective_skills,
                 enabled_features=enabled_features or (),
             )
         else:
@@ -515,6 +516,8 @@ class AgentBuilder:
         if hb is not None:
             heartbeat_enabled = getattr(hb, "enabled", False)
 
+        ctx_extras = getattr(ctx, "extras", {}) or {}
+        preloaded_skills = ctx_extras.pop("preloaded_skills", ())
         prompt_ctx = SimpleNamespace(
             workspace_dir=workspace_dir,
             agent_id=getattr(ctx, "agent_id", None),
@@ -524,6 +527,7 @@ class AgentBuilder:
                 "env_context": self._build_env_context(ctx, agent_config),
                 "agent_config": agent_config,
                 "driver_prompt_hints": self._get_driver_prompt_hints(ctx),
+                "preloaded_skills": preloaded_skills,
             },
         )
 

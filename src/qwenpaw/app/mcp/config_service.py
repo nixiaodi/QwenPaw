@@ -51,6 +51,7 @@ from ...drivers.constants import (
     PRINCIPAL_SUBJECT_USER,
     PROTOCOL_MCP,
 )
+from ...drivers.capabilities import mcp_tool_whitelist
 from ...drivers.contracts import (
     CredentialRef,
     DriverCard,
@@ -251,8 +252,8 @@ class MCPConfigService:
                 detail="mcp_tools_unavailable",
             ) from None
 
-        whitelist = card.config.get("tools")
-        whitelist_set = set(whitelist) if whitelist is not None else None
+        # Disk card is source of truth; in-memory capability.enabled may lag.
+        whitelist = mcp_tool_whitelist(card.config.get("tools"))
         return [
             MCPToolInfo(
                 name=capability.name,
@@ -293,7 +294,19 @@ class MCPConfigService:
                 )
             except MCPRevisionConflict as exc:
                 raise HTTPException(409, detail=str(exc)) from exc
-        await self._driver_config.save_card(card)
+        await self._driver_config.save_card(card, reload_driver=False)
+        manager = getattr(self._workspace, "driver_manager", None)
+        if manager is not None:
+            try:
+                await manager.refresh_driver(client_key)
+            except Exception as exc:
+                raise HTTPException(
+                    502,
+                    detail=(
+                        "MCP tool whitelist saved but failed to apply to "
+                        f"the active runtime: {exc}"
+                    ),
+                ) from exc
         try:
             return await self.list_tools(client_key)
         except HTTPException:

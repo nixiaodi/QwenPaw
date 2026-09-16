@@ -55,6 +55,11 @@ const PLUGIN_TYPE_CONFIG: Record<
     color: "default",
     icon: <Package size={11} />,
   },
+  memory: {
+    label: "Memory",
+    color: "magenta",
+    icon: <BrainCircuit size={11} />,
+  },
 };
 
 export function PluginTypeTag({ type }: { type: PluginType }) {

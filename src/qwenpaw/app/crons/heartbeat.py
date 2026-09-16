@@ -25,6 +25,7 @@ from ...config import (
     get_heartbeat_query_path,
     get_last_dispatch_for_user,
     load_config,
+    read_last_dispatch,
 )
 from ...constant import (
     HEARTBEAT_FILE,
@@ -379,11 +380,7 @@ async def run_heartbeat_once(
             platform_user_id=str(identity.authorized_user_id),
         )
     elif agent_id:
-        try:
-            agent_config = load_agent_config(agent_id)
-            last_dispatch = agent_config.last_dispatch
-        except Exception:
-            pass
+        last_dispatch = read_last_dispatch(agent_id)
     else:
         # Legacy: try root config
         config = load_config()

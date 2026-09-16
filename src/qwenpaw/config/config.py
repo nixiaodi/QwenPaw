@@ -2419,6 +2419,13 @@ class MCPClientConfig(BaseModel):
     args: List[str] = Field(default_factory=list)
     env: Dict[str, str] = Field(default_factory=dict)
     cwd: str = ""
+    http_timeout: Optional[float] = Field(
+        default=None,
+        gt=0,
+        description="HTTP MCP connect/write/pool timeout in seconds; "
+        "raises the read (sse_read_timeout) budget to at least this value. "
+        "None keeps the client default (30s / 300s).",
+    )
     tools: Optional[List[str]] = Field(
         default=None,
         description="Tool whitelist. Only listed tools will be loaded. "
@@ -2443,6 +2450,9 @@ class MCPClientConfig(BaseModel):
 
         if "type" in payload and "transport" not in payload:
             payload["transport"] = payload["type"]
+
+        if "timeout" in payload and "http_timeout" not in payload:
+            payload["http_timeout"] = payload["timeout"]
 
         if (
             "transport" not in payload
@@ -3456,8 +3466,8 @@ def load_agent_config(  # pylint: disable=too-many-branches,too-many-statements
             except Exception:
                 last_dispatch_migration_failed = True
                 logger.exception(
-                    f"Failed to migrate last dispatch state for agent "
-                    f"{agent_id}",
+                    "Failed to migrate last dispatch state for agent %s",
+                    agent_id,
                 )
             else:
                 data.pop("last_dispatch")

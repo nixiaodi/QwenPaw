@@ -427,7 +427,7 @@ def _register_non_descriptor_tools(registry: ToolRegistry) -> None:
 
     Exception path for dynamic / mode-scoped tools that must not appear in
     the global builtin set (scroll ``recall_history*``, memory manager
-    ``memory_search``). Keep this list documented when adding similar tools.
+    tools). Keep this list documented when adding similar tools.
     """
     # Scroll strategy tools — hand-built descriptors, not global builtins.
     register_tool_governance(

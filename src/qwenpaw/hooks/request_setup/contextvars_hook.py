@@ -182,7 +182,7 @@ class ContextVarsSetupHook(LifecycleHook):
             fork_dir = resolve_allowed_fork_project_dir(
                 request_context.get("fork_project_dir"),
                 workspace_dir=workspace_dir,
-                coding_project_dir=agent_project_dir,
+                project_dirs=[agent_project_dir] if agent_project_dir else None,
             )
         from ...services.project_directory import (
             resolve_effective_project_dir,

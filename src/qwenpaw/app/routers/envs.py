@@ -21,11 +21,6 @@ router = APIRouter(
 )
 
 
-# ------------------------------------------------------------------
-# Request / Response models
-# ------------------------------------------------------------------
-
-
 class EnvVar(BaseModel):
     """不包含明文的环境变量状态。"""
 
@@ -79,9 +74,19 @@ def _validate_operations(operations: list[EnvOperation]) -> None:
             )
 
 
-# ------------------------------------------------------------------
-# Endpoints
-# ------------------------------------------------------------------
+class EnvSpecResponse(BaseModel):
+    """Known environment setting and its ownership metadata."""
+
+    key: str
+    default: str
+    effective_value: str
+    source: Literal["default", "system", "user"]
+    description_key: str
+    editable: bool
+    value_type: Literal["string", "float", "integer", "boolean"]
+    readonly_reason_code: EnvReadonlyReason | None
+    mutability: Literal["hot_runtime", "startup_only"]
+    configured: bool
 
 
 @router.get(

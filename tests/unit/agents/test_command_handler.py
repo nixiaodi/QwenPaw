@@ -14,6 +14,22 @@ from qwenpaw.agents.memory.dummy import NoopMemoryManager
 from qwenpaw.agents.middlewares import auto_memory_turn_state
 
 
+class _ActionMemoryManager:
+    """Small structural MemoryActionProvider test double."""
+
+    enabled = True
+
+    def __init__(self, response=None):
+        self._response = response
+        self.run_action_mock = AsyncMock(return_value=response)
+
+    async def list_actions(self):
+        return {}
+
+    async def run_action(self, action: str, **kwargs):
+        return await self.run_action_mock(action, **kwargs)
+
+
 def _make_agent():
     """Build a minimal fake agent satisfying CommandHandler's expectations."""
     agent = MagicMock()
@@ -103,7 +119,7 @@ async def test_new_discards_auto_memory_state_after_summary_is_accepted() -> (
     auto_memory_turn_state(agent.state)["pending"] = ["turn-1"]
     memory_manager = MagicMock()
     memory_manager.enabled = True
-    memory_manager.add_summarize_task = MagicMock()
+    memory_manager.submit_auto_memory = MagicMock()
 
     await CommandHandler(
         agent_name="QwenPaw",
@@ -111,7 +127,7 @@ async def test_new_discards_auto_memory_state_after_summary_is_accepted() -> (
         memory_manager=memory_manager,
     ).handle_command("/new")
 
-    memory_manager.add_summarize_task.assert_called_once()
+    memory_manager.submit_auto_memory.assert_called_once()
     assert not agent.state.context
     assert auto_memory_turn_state(agent.state)["pending"] == []
 
@@ -280,6 +296,24 @@ async def test_dream_command_runs_auto_dream_with_hint() -> None:
 
 
 @pytest.mark.asyncio
+async def test_dream_command_reports_unsuccessful_response() -> None:
+    agent = _make_agent()
+    memory_manager = _ActionMemoryManager(
+        SimpleNamespace(success=False, answer="dream rejected", metadata={}),
+    )
+    handler = CommandHandler(
+        agent_name="QwenPaw",
+        agent=agent,
+        memory_manager=memory_manager,
+    )
+
+    msg = await handler.handle_command("/dream")
+
+    assert "Auto-dream Failed" in msg.get_text_content()
+    assert "dream rejected" in msg.get_text_content()
+
+
+@pytest.mark.asyncio
 async def test_dream_command_requires_memory_manager() -> None:
     agent = _make_agent()
     handler = CommandHandler(agent_name="QwenPaw", agent=agent)
@@ -290,11 +324,28 @@ async def test_dream_command_requires_memory_manager() -> None:
 
 
 @pytest.mark.asyncio
+async def test_auto_memory_status_lists_queued_tasks() -> None:
+    agent = _make_agent()
+    memory_manager = MagicMock(enabled=True)
+    memory_manager.list_auto_memory_tasks.return_value = []
+    handler = CommandHandler(
+        agent_name="QwenPaw",
+        agent=agent,
+        memory_manager=memory_manager,
+    )
+
+    msg = await handler.handle_command("/auto_memory_status")
+
+    assert handler.is_command("/auto_memory_status")
+    assert "No Auto-memory Tasks" in msg.get_text_content()
+    memory_manager.list_auto_memory_tasks.assert_called_once_with()
+
+
+@pytest.mark.asyncio
 async def test_reme_status_reports_memory_and_count_warning() -> None:
     agent = _make_agent()
-    memory_manager = MagicMock()
-    memory_manager.reme_status = AsyncMock(
-        return_value=SimpleNamespace(
+    memory_manager = _ActionMemoryManager(
+        SimpleNamespace(
             success=True,
             answer=(
                 "Memory (estimated component object size)\n"
@@ -315,7 +366,7 @@ async def test_reme_status_reports_memory_and_count_warning() -> None:
     text = msg.get_text_content()
 
     assert handler.is_command("/reme_status")
-    memory_manager.reme_status.assert_awaited_once_with()
+    memory_manager.run_action_mock.assert_awaited_once_with("status")
     assert "Process RSS       80.00 MiB" in text
     assert "may be counted more than once" in text
     assert "EMBEDDING_STORE" in text
@@ -387,6 +438,7 @@ async def test_memorize_defaults_to_latest_reply_group() -> None:
     del kwargs["messages"]
     assert kwargs == {
         "session_id": "session-1",
+        "trigger": "manual",
         "reply_id": "r2",
         "reply_ids": ["r2"],
         "actor_user_id": "user-1",
@@ -407,7 +459,7 @@ async def test_memorize_count_selects_latest_reply_groups() -> None:
         _msg("assistant", "a3", msg_id="r3"),
     ]
     memory_manager = MagicMock()
-    memory_manager.auto_memory = AsyncMock()
+    memory_manager.submit_auto_memory = MagicMock()
     handler = CommandHandler(
         agent_name="QwenPaw",
         agent=agent,
@@ -416,10 +468,10 @@ async def test_memorize_count_selects_latest_reply_groups() -> None:
 
     msg = await handler.handle_command("/memorize 2")
 
-    memory_manager.auto_memory.assert_awaited_once()
-    await_args = memory_manager.auto_memory.await_args
-    assert await_args is not None
-    args, kwargs = await_args
+    memory_manager.submit_auto_memory.assert_called_once()
+    call_args = memory_manager.submit_auto_memory.call_args
+    assert call_args is not None
+    args, kwargs = call_args
     assert [m.get_text_content() for m in args[0]] == [
         "u2",
         "a2",
@@ -441,7 +493,7 @@ async def test_memorize_falls_back_to_assistant_replies_by_role() -> None:
         _msg("assistant", "a2", name="ConfiguredName", msg_id="r2"),
     ]
     memory_manager = MagicMock()
-    memory_manager.auto_memory = AsyncMock()
+    memory_manager.submit_auto_memory = MagicMock()
     handler = CommandHandler(
         agent_name="QwenPaw",
         agent=agent,
@@ -450,10 +502,10 @@ async def test_memorize_falls_back_to_assistant_replies_by_role() -> None:
 
     msg = await handler.handle_command("/memorize")
 
-    memory_manager.auto_memory.assert_awaited_once()
-    await_args = memory_manager.auto_memory.await_args
-    assert await_args is not None
-    args, kwargs = await_args
+    memory_manager.submit_auto_memory.assert_called_once()
+    call_args = memory_manager.submit_auto_memory.call_args
+    assert call_args is not None
+    args, kwargs = call_args
     assert [m.get_text_content() for m in args[0]] == ["u2", "a2"]
     assert kwargs["reply_id"] == "r2"
     assert kwargs["reply_ids"] == ["r2"]
@@ -468,7 +520,7 @@ async def test_memorize_one_matches_explicit_one() -> None:
         _msg("assistant", "a1", msg_id="r1"),
     ]
     memory_manager = MagicMock()
-    memory_manager.auto_memory = AsyncMock()
+    memory_manager.submit_auto_memory = MagicMock()
     handler = CommandHandler(
         agent_name="QwenPaw",
         agent=agent,
@@ -477,10 +529,10 @@ async def test_memorize_one_matches_explicit_one() -> None:
 
     await handler.handle_command("/memorize 1")
 
-    memory_manager.auto_memory.assert_awaited_once()
-    await_args = memory_manager.auto_memory.await_args
-    assert await_args is not None
-    args, kwargs = await_args
+    memory_manager.submit_auto_memory.assert_called_once()
+    call_args = memory_manager.submit_auto_memory.call_args
+    assert call_args is not None
+    args, kwargs = call_args
     assert [m.get_text_content() for m in args[0]] == ["u1", "a1"]
     assert kwargs["reply_ids"] == ["r1"]
 
@@ -489,7 +541,7 @@ async def test_memorize_one_matches_explicit_one() -> None:
 async def test_memorize_rejects_invalid_count() -> None:
     agent = _make_agent()
     memory_manager = MagicMock()
-    memory_manager.auto_memory = AsyncMock()
+    memory_manager.submit_auto_memory = MagicMock()
     handler = CommandHandler(
         agent_name="QwenPaw",
         agent=agent,
@@ -498,7 +550,7 @@ async def test_memorize_rejects_invalid_count() -> None:
 
     msg = await handler.handle_command("/memorize two")
 
-    memory_manager.auto_memory.assert_not_awaited()
+    memory_manager.submit_auto_memory.assert_not_called()
     assert "Invalid Count" in msg.get_text_content()
 
 

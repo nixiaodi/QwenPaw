@@ -480,6 +480,7 @@ def _execute_subprocess_sync(
         proc = subprocess.Popen(  # pylint: disable=consider-using-with
             wrapped,
             shell=False,
+            stdin=subprocess.DEVNULL,
             stdout=stdout_file,
             stderr=stderr_file,
             text=False,
@@ -898,6 +899,7 @@ async def _execute_posix_host(
             shell_executable or "/bin/sh",
             "-c",
             cmd,
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=outputs.stdout_file,
             stderr=outputs.stderr_file,
             bufsize=0,
@@ -1090,12 +1092,7 @@ async def execute_shell_command(
 
     # Ensure the venv Python is on PATH for subprocesses
     env = os.environ.copy()
-    python_bin_dir = str(Path(sys.executable).parent)
-    existing_path = env.get("PATH", "")
-    if existing_path:
-        env["PATH"] = python_bin_dir + os.pathsep + existing_path
-    else:
-        env["PATH"] = python_bin_dir
+    env["PATH"] = shell_execution_path(env.get("PATH"))
 
     if sandbox_config is not None and not isinstance(
         sandbox_config,

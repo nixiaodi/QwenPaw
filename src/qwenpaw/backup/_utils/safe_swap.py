@@ -473,6 +473,7 @@ def extract_to_tmp(
     dst: Path,
     *,
     zip_slip_base: Path | None = None,
+    dir_mode: int | None = None,
 ) -> Path:
     """Phase 1 only: extract ZIP entries with *prefix* into a sibling
     ``.restore_tmp`` directory and return its path.
@@ -490,7 +491,10 @@ def extract_to_tmp(
         tmp_dst = dst.with_name(dst.name + _RESTORE_TMP_SUFFIX)
         if tmp_dst.exists():
             shutil.rmtree(tmp_dst)
-        tmp_dst.mkdir(parents=True, exist_ok=True)
+        if dir_mode is None:
+            tmp_dst.mkdir(parents=True, exist_ok=True)
+        else:
+            tmp_dst.mkdir(mode=dir_mode, parents=True, exist_ok=True)
 
         _extract_zip_to(zf, prefix, tmp_dst, base_resolved)
         return tmp_dst

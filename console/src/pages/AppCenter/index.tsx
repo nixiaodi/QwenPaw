@@ -112,6 +112,7 @@ export default function AppCenterPage() {
         data.apps.map((app) => ({
           id: app.id,
           name: app.name,
+          author: app.author,
           version: app.version,
           description: app.description,
           description_i18n: app.description_i18n ?? {},

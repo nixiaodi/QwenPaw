@@ -70,7 +70,7 @@ def _make_memory_manager(*, interval: int = 1):
     mm = MagicMock()
     mm.agent_id = "test-agent"
     mm.get_auto_memory_interval.return_value = interval
-    mm.auto_memory = AsyncMock()
+    mm.submit_auto_memory = MagicMock()
     mm.auto_memory_search = AsyncMock(return_value=None)
     mm.get_memory_prompt.return_value = ""
     return mm
@@ -449,7 +449,7 @@ class TestOnReplyAutomationSkip:
         state = _turn_state(agent)
         assert not state["pending"]
         assert not state["seen"]
-        mm.auto_memory.assert_not_awaited()
+        mm.submit_auto_memory.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_user_triggers_auto_memory(self):
@@ -466,7 +466,7 @@ class TestOnReplyAutomationSkip:
         async for _ in gen:
             pass
 
-        mm.auto_memory.assert_awaited_once()
+        mm.submit_auto_memory.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_internal_user_message_is_excluded_from_memory(self):
@@ -501,8 +501,12 @@ class TestOnReplyAutomationSkip:
         async for _ in mw.on_reply(agent, {}, _next):
             pass
 
-        mm.auto_memory.assert_awaited_once()
-        assert mm.auto_memory.await_args.args[0] == [query, reply, final_reply]
+        mm.submit_auto_memory.assert_called_once()
+        assert mm.submit_auto_memory.call_args.args[0] == [
+            query,
+            reply,
+            final_reply,
+        ]
 
     @pytest.mark.asyncio
     async def test_interval_state_survives_middleware_rebuild(self):
@@ -523,7 +527,7 @@ class TestOnReplyAutomationSkip:
         async for _ in gen1:
             pass
 
-        mm.auto_memory.assert_not_awaited()
+        mm.submit_auto_memory.assert_not_called()
         assert _turn_state(agent1)["pending"] == ["turn-1"]
 
         agent2 = _make_agent(source="user")
@@ -552,7 +556,7 @@ class TestOnReplyAutomationSkip:
         async for _ in gen2:
             pass
 
-        mm.auto_memory.assert_awaited_once()
+        mm.submit_auto_memory.assert_called_once()
         assert not _turn_state(agent2)["pending"]
 
     @pytest.mark.asyncio
@@ -574,17 +578,17 @@ class TestOnReplyAutomationSkip:
 
         for turn_number in range(1, 5):
             await reply(turn_number)
-            mm.auto_memory.assert_not_awaited()
+            mm.submit_auto_memory.assert_not_called()
 
         await reply(5)
-        mm.auto_memory.assert_awaited_once()
-        assert [msg.id for msg in mm.auto_memory.await_args.args[0]] == [
+        mm.submit_auto_memory.assert_called_once()
+        assert [msg.id for msg in mm.submit_auto_memory.call_args.args[0]] == [
             f"turn-{idx}" for idx in range(1, 6)
         ]
         assert not _turn_state(agent)["pending"]
 
         await reply(6)
-        mm.auto_memory.assert_awaited_once()
+        mm.submit_auto_memory.assert_called_once()
         assert _turn_state(agent)["pending"] == ["turn-6"]
 
 
@@ -605,7 +609,7 @@ class TestOnCompressContextAutomationSkip:
         await mw.on_compress_context(agent, {}, next_handler)
 
         next_handler.assert_awaited_once_with()
-        mm.auto_memory.assert_not_awaited()
+        mm.submit_auto_memory.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_heartbeat_does_not_inspect_compression(self):
@@ -642,7 +646,7 @@ class TestOnCompressContextAutomationSkip:
 
         assert "turn-1" in _turn_state(agent)["snapshots"]
         assert _turn_state(agent)["pending"] == ["turn-1"]
-        mm.auto_memory.assert_not_awaited()
+        mm.submit_auto_memory.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_normal_request_may_flush_on_compress(self):
@@ -658,8 +662,8 @@ class TestOnCompressContextAutomationSkip:
 
         await mw.on_compress_context(agent, {}, next_handler)
 
-        mm.auto_memory.assert_awaited_once()
-        assert mm.auto_memory.await_args.args[0][0].id == "turn-1"
+        mm.submit_auto_memory.assert_called_once()
+        assert mm.submit_auto_memory.call_args.args[0][0].id == "turn-1"
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -753,12 +757,12 @@ class TestOnCompressContextAutomationSkip:
         assert Msg.model_validate(raw_snapshot[0]).get_text_content() == (
             "remember me"
         )
-        mm.auto_memory.assert_not_awaited()
+        mm.submit_auto_memory.assert_not_called()
 
         await mw._flush_auto_memory(agent)
-        assert mm.auto_memory.await_args.args[0][0].get_text_content() == (
-            "remember me"
-        )
+        assert mm.submit_auto_memory.call_args.args[0][
+            0
+        ].get_text_content() == ("remember me")
 
 
 class TestDidCompressContext:
@@ -810,7 +814,7 @@ class TestFlushAutoMemoryDefensiveGuard:
         await mw._flush_auto_memory(agent)
 
         assert _turn_state(agent)["pending"] == ["m1", "m2"]
-        mm.auto_memory.assert_not_awaited()
+        mm.submit_auto_memory.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_normal_request_flushes(self):
@@ -823,13 +827,16 @@ class TestFlushAutoMemoryDefensiveGuard:
 
         await mw._flush_auto_memory(agent)
 
-        mm.auto_memory.assert_awaited_once()
+        mm.submit_auto_memory.assert_called_once()
         assert not _turn_state(agent)["pending"]
 
     @pytest.mark.asyncio
     async def test_failed_submission_keeps_pending_for_next_turn_retry(self):
         mm = _make_memory_manager()
-        mm.auto_memory.side_effect = [RuntimeError("submit failed"), None]
+        mm.submit_auto_memory.side_effect = [
+            RuntimeError("submit failed"),
+            None,
+        ]
         mw = MemoryMiddleware(memory_manager=mm)
         agent = _make_agent(source="user")
         agent.state = AgentState(session_id="session-1")
@@ -847,8 +854,8 @@ class TestFlushAutoMemoryDefensiveGuard:
             agent.state.model_dump(mode="json"),
         )
         await mw._flush_auto_memory(agent)
-        assert mm.auto_memory.await_count == 2
-        assert mm.auto_memory.await_args.args[0][0].id == "turn-1"
+        assert mm.submit_auto_memory.call_count == 2
+        assert mm.submit_auto_memory.call_args.args[0][0].id == "turn-1"
         assert not _turn_state(agent)["pending"]
         assert not _turn_state(agent)["snapshots"]
 
@@ -862,7 +869,7 @@ class TestFlushAutoMemoryDefensiveGuard:
 
         await mw._flush_auto_memory(agent)
 
-        assert [msg.id for msg in mm.auto_memory.await_args.args[0]] == [
+        assert [msg.id for msg in mm.submit_auto_memory.call_args.args[0]] == [
             "turn-2",
         ]
         assert not _turn_state(agent)["pending"]
@@ -879,7 +886,7 @@ class TestFlushAutoMemoryDefensiveGuard:
 
         await mw._flush_auto_memory(agent, count=1)
 
-        assert [msg.id for msg in mm.auto_memory.await_args.args[0]] == [
+        assert [msg.id for msg in mm.submit_auto_memory.call_args.args[0]] == [
             "turn-2",
         ]
         assert not _turn_state(agent)["pending"]

@@ -174,6 +174,10 @@ def _policy_tool_init(
     FunctionTool.__init__(self, func, **kwargs)
     self._qp_governor = governor
     self._qp_request_context = request_context or {}
+    # A plugin backend can retain a stable public tool name while selecting a
+    # more precise governance identity. Remote searches can therefore opt into
+    # a network policy while local backends keep the internal policy identity.
+    self._qp_policy_name = getattr(func, "_qwenpaw_policy_name", "")
     self._qp_policy_decision = None  # Pre-evaluation result
     self._qp_sandbox_mode = False  # Whether to execute in sandbox
     self._qp_raw_params = {}  # Set per-call by check_permissions
@@ -183,9 +187,7 @@ def _build_tc_spec(self: Any) -> ToolCallSpec:
     """Build ToolCallSpec from instance fields + dynamic target."""
     governor = self._qp_governor
     params = getattr(self, "_qp_raw_params", {})
-    tool_name = DEFAULT_REGISTRY.python_to_policy_name(
-        getattr(self, "name", "Unknown"),
-    )
+    tool_name = _policy_tool_name(self)
     request_ctx = getattr(self, "_qp_request_context", {}) or {}
     return ToolCallSpec(
         tool_name=tool_name,
@@ -237,9 +239,7 @@ def _prepare_off_mode_sandbox(tool: Any, governor: Any) -> None:
 
     if governor is None:
         return
-    policy_name = DEFAULT_REGISTRY.python_to_policy_name(
-        getattr(tool, "name", "Unknown"),
-    )
+    policy_name = _policy_tool_name(tool)
     if not DEFAULT_REGISTRY.requires_sandbox(policy_name):
         return
     if not getattr(governor, "sandbox_usable", False):

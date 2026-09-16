@@ -106,6 +106,22 @@ def test_workspace_reload_reuses_memory_manager(tmp_path) -> None:
     assert descriptor.reusable is True
 
 
+def test_local_workspace_post_init_accepts_service_manager_publisher(
+    tmp_path,
+) -> None:
+    """The local workspace factory follows the three-argument hook contract."""
+    workspace = Workspace(
+        agent_id="agent-1",
+        workspace_dir=str(tmp_path),
+    )
+    descriptor = workspace._service_manager.descriptors["local_workspace"]
+    published = []
+
+    service = descriptor.post_init(workspace, None, published.append)
+
+    assert service is workspace._local_workspace
+
+
 @pytest.mark.asyncio
 async def test_workspace_replaces_reused_memory_manager_after_backend_switch(
     tmp_path,

@@ -11,14 +11,16 @@ Each Workspace represents a standalone agent workspace with its own:
 Request processing is handled by ``Runtime`` (see ``stream_query``).
 """
 
+import asyncio
 from contextlib import aclosing
 import logging
 from pathlib import Path
-from typing import Any, AsyncGenerator, Iterable, Optional
+from typing import Any, AsyncGenerator, Callable, Iterable, Optional
 
 from ...platform_ops.maintenance_lifecycle import admitted_stream
 from ...config.timezone import normalize_tz
 from ...config.utils import load_config
+from ...utils.io_utils import run_async_to_completion
 
 from .service_manager import ServiceDescriptor, ServiceManager
 from .workspace_plugins import WorkspacePlugins
@@ -139,6 +141,7 @@ class Workspace:
         # Non-service state
         self._config = None  # Loaded before start()
         self._started = False
+        self._start_attempted = False
         self._manager = None  # Reference to MultiAgentManager
         self._task_tracker = TaskTracker()
         self._app_services: Any = None
@@ -420,6 +423,7 @@ class Workspace:
         def _init_local_workspace(
             ws: "Workspace",
             _service: Any,
+            _publish: Callable[[Any], None],
         ) -> "QwenPawLocalWorkspace":
             return ws._local_workspace  # pylint: disable=protected-access
 
@@ -598,6 +602,7 @@ class Workspace:
             logger.debug(f"Workspace already started: {self.agent_id}")
             return
 
+        self._start_attempted = True
         logger.info(f"Starting workspace: {self.agent_id}")
 
         from ...agents.skill_system import (
@@ -651,12 +656,24 @@ class Workspace:
             self._started = True
             logger.info(f"Workspace started successfully: {self.agent_id}")
 
-        except Exception as e:
-            logger.error(
-                f"Failed to start agent instance {self.agent_id}: {e}",
-            )
-            # Clean up partially started components
-            await self.stop()
+        except BaseException as error:
+            if not isinstance(error, asyncio.CancelledError):
+                logger.error(
+                    "Failed to start agent instance "
+                    f"{self.agent_id}: {error}",
+                )
+            try:
+                await run_async_to_completion(
+                    self.stop(final=True, preserve_reused=True),
+                )
+            except asyncio.CancelledError:
+                if not isinstance(error, asyncio.CancelledError):
+                    raise
+            except BaseException as cleanup_error:
+                logger.warning(
+                    "Failed to clean up partially started workspace "
+                    f"{self.agent_id}: {cleanup_error}",
+                )
             raise
 
     def _migrate_legacy_weixin_data(self) -> None:
@@ -721,14 +738,18 @@ class Workspace:
                 exc,
             )
 
-    async def stop(self, final: bool = True):
+    async def stop(
+        self,
+        final: bool = True,
+        preserve_reused: bool = False,
+    ):
         """Stop agent instance and clean up all resources.
 
         Args:
             final: If True (default), stop ALL services including reusable.
                    If False, skip reusable services (for reload scenario).
         """
-        if not self._started:
+        if not self._started and not self._start_attempted:
             logger.debug(f"Workspace not started: {self.agent_id}")
             return
 
@@ -737,13 +758,17 @@ class Workspace:
         )
 
         # Stop all services via ServiceManager (handles reuse automatically)
-        await self._service_manager.stop_all(final=final)
+        await self._service_manager.stop_all(
+            final=final,
+            preserve_reused=preserve_reused,
+        )
 
         if self._harness_runtime is not None:
             await self._harness_runtime.stop()
             self._harness_runtime = None
 
         self._started = False
+        self._start_attempted = False
         logger.info(f"Workspace stopped: {self.agent_id}")
 
     def __repr__(self) -> str:

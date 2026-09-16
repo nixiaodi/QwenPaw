@@ -51,6 +51,7 @@ class QwenPawDriverApprovalGate:
             )
 
         from . import get_approval_service
+        from ...config.context import get_f1_reasoning
 
         svc = get_approval_service()
         tool_call_id = str(ctx.get("tool_call_id") or "")
@@ -98,6 +99,7 @@ class QwenPawDriverApprovalGate:
                 "_channel_instance": ctx.get("_channel_instance"),
                 "conversation_id": ctx.get("conversation_id"),
                 "run_id": ctx.get("run_id"),
+                "reasoning": get_f1_reasoning(session_id),
                 **(
                     {
                         "_spawn_subagent": True,

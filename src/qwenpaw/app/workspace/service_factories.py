@@ -6,8 +6,9 @@ and initialize service components. Extracted from local functions to
 improve testability and code organization.
 """
 
-from typing import TYPE_CHECKING
+import asyncio
 import logging
+from typing import TYPE_CHECKING, Any, Callable
 
 if TYPE_CHECKING:
     from .workspace import Workspace
@@ -15,7 +16,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-async def create_driver_service(ws: "Workspace", _service):
+async def create_driver_service(
+    ws: "Workspace",
+    _service,
+    publish: Callable[[Any], None],
+):
     """Create and initialize the per-workspace DriverManager.
 
     DriverManager is the runtime for external capabilities.  MCP is wired as
@@ -71,13 +76,13 @@ async def create_driver_service(ws: "Workspace", _service):
         MCPDriverHandler,
         endpoint_validator=validate_mcp_endpoint,
     )
+    publish(driver_manager)
     # Future Driver protocols should be registered here together with their
     # endpoint validator and tests.  This PR intentionally keeps the concrete
     # runtime surface to MCP while leaving DriverManager protocol-neutral.
     if postgres_repository is None:
         await migrate_legacy_mcp_if_needed(ws, driver_manager)
     await driver_manager.start()
-    ws._service_manager.services["driver_manager"] = driver_manager
     logger.debug(
         "DriverManager external capability runtime initialized for agent: %s",
         ws.agent_id,
@@ -86,7 +91,11 @@ async def create_driver_service(ws: "Workspace", _service):
     # pylint: enable=protected-access
 
 
-async def create_driver_config_watcher(ws: "Workspace", _service):
+async def create_driver_config_watcher(
+    ws: "Workspace",
+    _service,
+    publish: Callable[[Any], None],
+):
     """Create watcher for manual DriverCard edits.
 
     Console/API updates call ``DriverConfigService.reload_driver_best_effort``
@@ -108,12 +117,16 @@ async def create_driver_config_watcher(ws: "Workspace", _service):
         driver_manager,
         ws.workspace_dir / "drivers",
     )
-    ws._service_manager.services["driver_config_watcher"] = watcher
+    publish(watcher)
     return watcher
     # pylint: enable=protected-access
 
 
-async def create_chat_service(ws: "Workspace", service):
+async def create_chat_service(
+    ws: "Workspace",
+    service,
+    publish: Callable[[Any], None],
+):
     """Create chat manager, or reuse existing one.
 
     Args:
@@ -227,7 +240,7 @@ async def create_chat_service(ws: "Workspace", service):
             run_persistence=run_persistence,
             conversation_repository=conversation_repository,
         )
-        ws._service_manager.services["chat_manager"] = cm
+        publish(cm)
         logger.info(f"ChatManager created: {chats_path}")
     cm.set_on_session_closed(close_browser_session)
     cm.set_on_chat_created(record_chat_created)
@@ -272,7 +285,11 @@ async def create_chat_service(ws: "Workspace", service):
     # pylint: enable=protected-access
 
 
-async def create_channel_service(ws: "Workspace", _):
+async def create_channel_service(
+    ws: "Workspace",
+    _,
+    publish: Callable[[Any], None],
+):
     """Create channel manager if configured.
 
     Args:
@@ -321,7 +338,7 @@ async def create_channel_service(ws: "Workspace", _):
         on_last_dispatch=on_last_dispatch,
         workspace_dir=ws.workspace_dir,
     )
-    ws._service_manager.services["channel_manager"] = cm
+    publish(cm)
 
     cm.set_workspace(ws)
     from ..approvals import get_approval_service
@@ -336,7 +353,56 @@ async def create_channel_service(ws: "Workspace", _):
     # pylint: enable=protected-access
 
 
-async def create_agent_config_watcher(ws: "Workspace", _):
+async def create_mail_monitor_service(
+    ws: "Workspace",
+    _,
+    publish: Callable[[Any], None],
+):
+    """Create the per-agent mail push monitor when explicitly enabled."""
+    if getattr(ws._config, "backend", "qwenpaw") != "qwenpaw":
+        return None
+    mail = getattr(ws._config, "mail", None)
+    if mail is None or mail.push is None or mail.push.mode == "off":
+        return None
+    if mail.is_new_account:
+        return None
+    credential = mail.credential
+    if not credential.name or not credential.auth_code:
+        return None
+
+    from ...agents.utils import ensure_workspace_md_file
+    from ..mail.monitor import MailMonitorService
+
+    language = getattr(ws._config, "language", None)
+    if not language:
+        try:
+            from ...config import load_config as _load_root_config
+
+            language = _load_root_config().agents.language
+        except Exception:  # pragma: no cover - best-effort fallback
+            language = None
+    for seed_name in ("CONTACTS.md", "MAIL_TRIAGE.md"):
+        await asyncio.to_thread(
+            ensure_workspace_md_file,
+            ws.workspace_dir,
+            language or "en",
+            seed_name,
+        )
+
+    monitor = MailMonitorService(
+        agent_id=ws.agent_id,
+        workspace=ws,
+        mail_config=mail,
+    )
+    publish(monitor)
+    return monitor
+
+
+async def create_agent_config_watcher(
+    ws: "Workspace",
+    _,
+    publish: Callable[[Any], None],
+):
     """Create agent config watcher if channel/cron exists.
 
     The watcher only triggers reloads via ``MultiAgentManager`` and
@@ -366,6 +432,6 @@ async def create_agent_config_watcher(ws: "Workspace", _):
         workspace_dir=ws.workspace_dir,
         workspace=ws,
     )
-    ws._service_manager.services["agent_config_watcher"] = watcher
+    publish(watcher)
     return watcher
     # pylint: enable=protected-access

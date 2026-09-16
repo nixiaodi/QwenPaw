@@ -35,6 +35,7 @@ from .mcp_stateful_client import (
     HttpStatefulClient,
     StdIOStatefulClient,
 )
+from .mcp_streamable_http import HttpAutoClient
 from ..credentials.types import ResolvedCredential
 from ..errors import (
     ApprovalRequiredError,
@@ -86,7 +87,12 @@ class MCPDriverHandler(DriverHandler):
             )
             headers.update(implicit_auth_headers(credentials, headers))
             self._http_headers = dict(headers)
-            self._client = HttpStatefulClient(
+            client_cls = (
+                HttpAutoClient
+                if transport == "streamable_http"
+                else HttpStatefulClient
+            )
+            self._client = client_cls(
                 name=self._card.name,
                 transport=transport,
                 url=str(endpoint.get("url") or ""),
@@ -151,7 +157,12 @@ class MCPDriverHandler(DriverHandler):
         headers.update(implicit_auth_headers(credentials, headers))
         if headers != self._http_headers:
             self._client.headers = headers or None
-            await self._client.reload()
+            reload_client = getattr(self._client, "reload", None)
+            if reload_client is not None:
+                await reload_client()
+            else:
+                await self._client.close(ignore_errors=True)
+                await self._client.connect()
             self._http_headers = dict(headers)
             self._capability_cache = None
             # Revocation may have committed while the new connection opened.

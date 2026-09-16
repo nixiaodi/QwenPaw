@@ -284,13 +284,21 @@ async def _policy_tool_check_permissions(
     request_ctx = getattr(self, "_qp_request_context", None) or {}
     effective_level = _resolve_effective_approval_level(request_ctx)
     is_automation = request_ctx.get("actor_type") == "automation"
+    from ..config.context import (
+        get_current_session_id,
+        is_f1_active_for_session,
+    )
+    from ..security.tool_guard.execution_level import ToolExecutionLevel
+
+    f1_session_id = request_ctx.get("session_id") or get_current_session_id()
+    f1_active = is_f1_active_for_session(f1_session_id)
+    if f1_active:
+        effective_level = ToolExecutionLevel.STRICT
     if (
         effective_level is not None
         and effective_level.is_disabled()
         and is_automation
     ):
-        from ..security.tool_guard.execution_level import ToolExecutionLevel
-
         effective_level = ToolExecutionLevel.AUTO
     if effective_level is not None and effective_level.is_disabled():
         # OFF means "never ask the user" — it does NOT mean "skip the
@@ -308,7 +316,7 @@ async def _policy_tool_check_permissions(
 
     # Sync effective approval_level to the governor's policy
     # so the three-phase evaluation uses the correct threshold.
-    if governor is not None and effective_level is not None:
+    if governor is not None and effective_level is not None and not f1_active:
         governor.policy.execution_level = effective_level.value
 
     if governor is None:
@@ -347,7 +355,15 @@ async def _policy_tool_check_permissions(
             ),
         )
 
-    decision = governor.assert_policy(tc_spec)
+    if f1_active:
+        previous_level = governor.policy.execution_level
+        governor.policy.execution_level = ToolExecutionLevel.STRICT.value
+        try:
+            decision = governor.assert_policy(tc_spec)
+        finally:
+            governor.policy.execution_level = previous_level
+    else:
+        decision = governor.assert_policy(tc_spec)
     governor.audit(tc_spec, decision)
 
     # Cache the decision + tc_spec for __call__ to use
@@ -693,6 +709,8 @@ async def _ask_user_approval(
     if session_id and tool_call_id:
         await svc.cancel_stale_pending_for_tool_call(session_id, tool_call_id)
 
+    from ..config.context import get_f1_reasoning
+
     pending = await svc.create_pending(
         session_id=session_id,
         root_session_id=root_session_id,
@@ -720,6 +738,7 @@ async def _ask_user_approval(
             "_channel_instance": ctx.get("_channel_instance"),
             "conversation_id": ctx.get("conversation_id"),
             "run_id": ctx.get("run_id"),
+            "reasoning": get_f1_reasoning(session_id),
             **(
                 {"_spawn_subagent": True} if ctx.get("_spawn_subagent") else {}
             ),

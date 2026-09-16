@@ -41,6 +41,7 @@ from .slash import router as slash_router
 from .git import router as git_router
 from .project_directory import router as project_directory_router
 from .access_control import router as access_control_router
+from .mail_access_control import router as mail_access_control_router
 from .provider_oauth import router as provider_oauth_router
 from .pawapps import router as pawapps_router
 from .harnesses import router as harnesses_router
@@ -92,6 +93,7 @@ router.include_router(slash_router)
 router.include_router(git_router)
 router.include_router(project_directory_router)
 router.include_router(access_control_router)
+router.include_router(mail_access_control_router)
 router.include_router(provider_oauth_router)
 router.include_router(pawapps_router)
 router.include_router(harnesses_router)

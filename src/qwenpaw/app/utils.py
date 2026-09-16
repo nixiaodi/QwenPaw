@@ -238,6 +238,9 @@ def schedule_agent_reload(request: "Request", agent_id: str) -> None:
         )
         return
 
+    # Invalidate reloads that began before the just-persisted config write.
+    manager.note_agent_config_changed(agent_id)
+
     async def reload_in_background():
         try:
             await manager.reload_agent(agent_id)

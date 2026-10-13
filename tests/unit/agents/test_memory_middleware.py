@@ -79,6 +79,114 @@ def _turn_state(agent):
     return auto_memory_turn_state(agent.state)
 
 
+class TestAutoSearchVisibility:
+    @pytest.mark.asyncio
+    async def test_native_agent_stream_delivers_recall_and_model_receives_evidence(self):
+        from agentscope.agent import Agent
+        from agentscope.model import ChatResponse
+        from qwenpaw.agents.memory.base_memory_manager import BaseMemoryManager
+        from qwenpaw.runtime.envelope import Envelope
+        from qwenpaw.runtime.executor import AgentExecutor
+
+        captured = []
+
+        class Model:
+            model = "local-test"
+            context_size = 100000
+
+            async def count_tokens(self, *args, **kwargs):
+                return 1
+
+            async def __call__(self, **kwargs):
+                captured.append(kwargs["messages"])
+                return ChatResponse(content=[TextBlock(text="结合已保存记忆回答")], is_last=True)
+
+        manager = _make_memory_manager(interval=0)
+        query = _user_msg("成都住房公积金都有哪些新政策")
+        memory = BaseMemoryManager._build_auto_memory_search_msg(
+            manager, query=query.get_text_content(), max_results=2,
+            text="[my_memory] memory/policy.md:7\n保存的公积金政策",
+        )
+        manager.auto_memory_search.return_value = {"msg": [query, memory]}
+        agent = Agent(name="test", system_prompt="test", model=Model(), middlewares=[MemoryMiddleware(memory_manager=manager)])
+        agent._request_context = {"source": "user", "user_id": "trusted-user"}
+        wire = [item.model_dump(mode="json") async for item in AgentExecutor(agent, Envelope()).run([query])]
+        completed = [item for item in wire if item.get("object") == "message" and item.get("status") == "completed"]
+        assert [item["type"] for item in completed[:2]] == ["plugin_call", "plugin_call_output"]
+        assert completed[1]["content"][0]["data"]["state"] == "success"
+        assert captured[0][-1].id == memory.id
+        assert all(message.id != memory.id for message in agent.state.context)
+
+    @pytest.mark.asyncio
+    async def test_retrieved_memory_is_streamed_before_answer_once_per_reply(self):
+        from agentscope.event import ModelCallStartEvent, TextBlockStartEvent
+        from qwenpaw.agents.memory.base_memory_manager import BaseMemoryManager
+        from qwenpaw.runtime.envelope import Envelope
+
+        manager = _make_memory_manager()
+        middleware = MemoryMiddleware(memory_manager=manager)
+        agent = _make_agent(source="user")
+        query = _user_msg("成都住房公积金都有哪些新政策")
+        agent.state.context = [query]
+        memory = BaseMemoryManager._build_auto_memory_search_msg(
+            manager,
+            query=query.get_text_content(),
+            max_results=2,
+            text="[my_memory] memory/policy.md:7\n已保存的公积金政策",
+        )
+        manager.auto_memory_search.return_value = {"msg": [query, memory]}
+        captured = []
+
+        async def model(**kwargs):
+            captured.append(kwargs["messages"])
+
+        async def reasoning(**_kwargs):
+            yield ModelCallStartEvent(reply_id="reply-1", model_name="test")
+            await middleware.on_model_call(agent, {"messages": [query]}, model)
+            yield TextBlockStartEvent(reply_id="reply-1", block_id="answer")
+
+        events = [event async for event in middleware.on_reasoning(agent, {}, reasoning)]
+        types = [str(event.type) for event in events]
+        assert types == [
+            "MODEL_CALL_START", "TOOL_CALL_START", "TOOL_CALL_DELTA",
+            "TOOL_CALL_END", "TOOL_RESULT_START", "TOOL_RESULT_TEXT_DELTA",
+            "TOOL_RESULT_END", "TEXT_BLOCK_START",
+        ]
+        assert captured[0][1].id == memory.id
+        assert agent.state.context == [query]
+        repeated = [event async for event in middleware.on_reasoning(agent, {}, reasoning)]
+        assert [str(event.type) for event in repeated] == ["MODEL_CALL_START", "TEXT_BLOCK_START"]
+        manager.auto_memory_search.assert_awaited_once()
+
+        envelope = Envelope()
+        wire = [obj.model_dump(mode="json") for event in events async for obj in envelope.translate_event(event)]
+        completed = [obj for obj in wire if obj.get("object") == "message" and obj.get("status") == "completed"]
+        assert [obj["type"] for obj in completed] == ["plugin_call", "plugin_call_output"]
+        assert completed[1]["content"][0]["data"]["name"] == "memory_search"
+        assert "公积金政策" in completed[1]["content"][0]["data"]["output"]
+
+    @pytest.mark.asyncio
+    async def test_missing_or_previous_turn_memory_is_not_reported_as_a_hit(self):
+        from agentscope.event import ModelCallStartEvent, TextBlockStartEvent
+
+        manager = _make_memory_manager()
+        middleware = MemoryMiddleware(memory_manager=manager)
+        agent = _make_agent(source="user")
+        agent.state.context = [_user_msg(msg_id="new-turn")]
+        _turn_state(agent)["search"] = {
+            "turn_marker": "old-turn",
+            "messages": [Msg(name="memory_search", role="assistant", content=[TextBlock(text="old evidence")]).model_dump(mode="json")],
+        }
+
+        async def reasoning(**_kwargs):
+            yield ModelCallStartEvent(reply_id="reply-1", model_name="test")
+            await middleware.on_model_call(agent, {"messages": agent.state.context}, AsyncMock())
+            yield TextBlockStartEvent(reply_id="reply-1", block_id="answer")
+
+        events = [event async for event in middleware.on_reasoning(agent, {}, reasoning)]
+        assert [str(event.type) for event in events] == ["MODEL_CALL_START", "TEXT_BLOCK_START"]
+
+
 # ---------------------------------------------------------------------------
 # _is_automation_request unit tests
 # ---------------------------------------------------------------------------

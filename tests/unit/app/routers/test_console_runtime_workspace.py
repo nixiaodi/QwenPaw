@@ -146,9 +146,11 @@ async def test_use_only_chat_runs_in_current_users_personal_workspace(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("role", [AgentResourceRole.USER, AgentResourceRole.OWNER, AgentResourceRole.COLLABORATOR])
 async def test_use_only_chat_upload_is_saved_in_personal_workspace(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    role: AgentResourceRole,
 ) -> None:
     """把聊天附件写入共享 Agent media 目录时，本测试必须失败。"""
     shared = tmp_path / "workspaces" / "shared-agent"
@@ -187,8 +189,10 @@ async def test_use_only_chat_upload_is_saved_in_personal_workspace(
     monkeypatch.setattr(workspace_files, "WORKING_DIR", tmp_path)
     _install_private_workspace_repository(monkeypatch)
 
+    request = _request()
+    request.state.agent_access.role = role
     result = await console_router.post_console_upload(
-        request=_request(),
+        request=request,
         file=UploadFile(
             filename="reference.txt",
             file=BytesIO(b"private-reference"),

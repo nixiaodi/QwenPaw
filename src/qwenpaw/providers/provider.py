@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 
 
 class ModelInfo(BaseModel):
+    enabled: bool = Field(default=True, description="Whether this model is selectable")
     id: str = Field(..., description="Model identifier used in API calls")
     name: str = Field(..., description="Human-readable model name")
     supports_multimodal: bool | None = Field(
@@ -152,6 +153,7 @@ class ProviderInfo(BaseModel):
     )
 
     id: str = Field(..., description="Provider identifier")
+    enabled: bool = Field(default=True, description="Whether this provider is selectable")
     name: str = Field(..., description="Human-readable provider name")
     base_url: str = Field(default="", description="API base URL")
     api_key: str = Field(default="", description="API key for authentication")
@@ -338,6 +340,8 @@ class Provider(ProviderInfo, ABC):
 
     def update_config(self, config: Dict) -> None:
         """Update provider configuration with the given dictionary."""
+        if config.get("enabled") is not None:
+            self.enabled = bool(config["enabled"])
         if "name" in config and config["name"] is not None:
             self.name = str(config["name"]).strip()
         if (
@@ -460,6 +464,8 @@ class Provider(ProviderInfo, ABC):
         """Update per-model configuration (e.g. generate_kwargs)."""
         for model in self.models + self.extra_models:
             if model.id == model_id:
+                if config.get("enabled") is not None:
+                    model.enabled = bool(config["enabled"])
                 if (
                     "generate_kwargs" in config
                     and config["generate_kwargs"] is not None
@@ -642,6 +648,7 @@ class Provider(ProviderInfo, ABC):
         meta = self.meta or {}
         return ProviderInfo(
             id=self.id,
+            enabled=self.enabled,
             name=self.name,
             base_url=self.base_url,
             api_key=api_key,

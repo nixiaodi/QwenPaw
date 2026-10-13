@@ -203,7 +203,7 @@ Windows PowerShell：
 
 `QWENPAW_*` 是程序内部兼容配置名，不能自行改名。数据库密码如果包含 `@`、`:`、`/`、`%` 等字符，必须先进行 URL 编码。`service.local.json` 包含数据库凭据，不能提交到 Git，并应限制为仅服务运行账户可读。
 
-如果需要从局域网访问 Web 服务，可以把 `host` 改为 `0.0.0.0`，同时通过操作系统防火墙限制 18089 端口的来源网段。数据库绑定地址仍保持 `127.0.0.1`。远程正式访问应配置 HTTPS，以支持默认启用 Secure 的登录刷新 Cookie。
+如果需要从局域网访问 Web 服务，可以把 `host` 改为 `0.0.0.0`，同时通过操作系统防火墙限制 18089 端口的来源网段。数据库绑定地址仍保持 `127.0.0.1`。HTTPS 使用默认 Secure 登录刷新 Cookie；纯 HTTP 内网部署需按第 10 节显式调整 Cookie 配置。
 
 ## 7. 初始化数据库和应用
 
@@ -274,6 +274,22 @@ powershell -ExecutionPolicy Bypass -File "deploy/install-windows-task.ps1" `
 无人登录时就要启动的 Windows 服务器，需在任务计划程序中另行配置运行账户和开机触发器，同时保证 Docker 已运行。Linux 可以复制并按实际账户、源码路径和配置路径调整 `deploy/qwenpaw.service`，随后安装为 systemd 服务。Docker 的 `agent-pg` 使用 `restart: unless-stopped`，Docker 服务启动后会自动恢复。使用任务计划或 systemd 前先停止手动启动的应用，避免两个管理器竞争同一端口。
 
 ## 10. 验证边界
+
+### 内网访问、文件预览与下载
+
+其他电脑使用 `http://<服务器内网IP>:18089` 访问，或在配置 HTTPS 反向代理后使用 `https://<服务器内网域名>`；`127.0.0.1` 仅用于服务器本机。应用监听 `0.0.0.0`，防火墙只放行需要访问的内网网段。前后端一起部署时，保持 `VITE_API_BASE_URL` 为空，预览和下载走当前站点的 `/api`，无需在客户端挂载服务器目录。反向代理也必须转发 `/api`。
+
+纯 HTTP 内网部署：在 `deploy/service.local.json` 的 `environment` 对象中保留原有配置，增加 `"QWENPAW_SESSION_COOKIE_SECURE": "false"`。默认刷新 Cookie 带有 Secure 属性，普通内网 IP 的 HTTP 访问需要此设置才能正常续期；localhost 上可用不代表普通内网 HTTP 具备相同的 Cookie 行为。修改后重启服务，并让用户重新登录：
+
+```powershell
+& ".venv/Scripts/python.exe" -m qwenpaw service --config "deploy/service.local.json" restart
+```
+
+Linux 使用 `.venv/bin/python -m qwenpaw service --config deploy/service.local.json restart`。此设置保留登录鉴权、HttpOnly 和 SameSite 限制，但 HTTP 不加密传输，应限定在可信内网使用。文字聊天、报告生成、预览和下载可使用 HTTP；浏览器麦克风输入及部分剪贴板操作可能因缺少安全上下文而受限。以后启用 HTTPS 时，将该配置恢复为 `"true"`，重启并重新登录。
+
+生成文件应通过 `send_file_to_user` 登记到产物中心，回复使用工具返回的 `/api/console/artifacts/<产物ID>/download` 链接。网页点击时会附带登录信息下载。历史回复中的 `sandbox:/mnt/data/<文件名>` 会按当前用户、智能体及对话匹配已登记产物；同名产物取该对话最近登记的一份。找不到时会显示提示，不会读取服务器任意路径；文件面板可用于选择具体版本。未登记的 sandbox 地址不是有效文件链接。
+
+预览和下载遵循用户权限：登录用户可访问自己的文件，其他用户不能凭文件路径下载其私人报告；共享对话也不代表自动公开其中的私人产物。验收时在另一台内网电脑登录，实际生成并预览、下载 PDF 或图片，检查中文文件名、登录续期，以及另一账户不能访问私人文件。
 
 执行以下检查：
 

@@ -13,7 +13,7 @@ from ...access.dependencies import get_actor
 from ..agent_context import get_agent_for_request
 from ..agent_context import get_files_workspace_access
 from ..attachments.models import AttachmentListItem
-from ..attachments.service import AttachmentLifecycleError, AttachmentLifecycleService
+from ..attachments.service import AttachmentLifecycleError, AttachmentLifecycleService, resolve_attachment_runtime_root
 
 router = APIRouter(prefix="/console/attachments", tags=["attachments"])
 
@@ -49,8 +49,14 @@ async def _lifecycle_service(request: Request):
     repository = workspace.chat_manager.conversation_repository
     if actor.user_id is None or repository is None:
         raise HTTPException(status_code=401, detail="not_authenticated")
-    access = await get_files_workspace_access(request, workspace)
-    return AttachmentLifecycleService(repository=repository.with_user(actor.user_id), runtime_root=access.project.path), actor.user_id
+    from ...identity.runtime import is_multi_user_enabled
+    if is_multi_user_enabled():
+        root = await resolve_attachment_runtime_root(user_id=actor.user_id, agent_key=workspace.agent_id)
+        legacy_media_root = workspace.workspace_dir / "media"
+    else:
+        access = await get_files_workspace_access(request, workspace)
+        root, legacy_media_root = access.project.path, None
+    return AttachmentLifecycleService(repository=repository.with_user(actor.user_id), runtime_root=root, legacy_media_root=legacy_media_root), actor.user_id
 
 
 @router.post("/{attachment_id}/save", response_model=AttachmentListItem)

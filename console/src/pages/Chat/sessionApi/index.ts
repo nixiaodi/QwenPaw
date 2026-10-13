@@ -772,6 +772,12 @@ class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
     this.sessionList = [];
     this._prevReturnedList = null;
     this.lastSelectedIds.clear();
+    // Agent selection can happen on Skills/Settings while ChatPage is unmounted.
+    // Clear restore and transport identities here, before any new-agent render.
+    this.preferredChatId = null;
+    this.lastActiveChatId = null;
+    this.lastNavigatedChatId = null;
+    this.resetWindowIdentity();
     // Release the switch lock: the switch it belonged to is owned by the
     // previous epoch and its completion handler may never run (e.g. the
     // initializer aborted on unmount). Leaving it set would make the new
@@ -1102,6 +1108,15 @@ class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
   /** Returns the real backend UUID, or null when not yet resolved. */
   getRealIdForSession(sessionId: string): string | null {
     return this.findSession(sessionId)?.realId ?? null;
+  }
+
+  /** The POST response bound this UUID to a live session of this Agent. */
+  hasResolvedSessionForAgent(chatId: string, agentId: string): boolean {
+    return this.activeOwner.agentId === agentId &&
+      Boolean(this.findSession(chatId) && (
+        this.findSession(chatId)?.id === chatId ||
+        this.findSession(chatId)?.realId === chatId
+      ));
   }
 
   /** Resolves the effective ID for URL navigation (prefers backend UUID). */

@@ -5,6 +5,7 @@ import { useAgentStore } from "@/stores/agentStore";
 import { getApiToken, setApiAuthMode, setAuthToken } from "../config";
 import { agentsApi } from "./agents";
 import { clearAccessSession } from "../authSession";
+import { captureSkillScope } from "../skillScope";
 
 function identity(id: string) {
   useAuthStore.setState({
@@ -127,7 +128,11 @@ describe("skill transport identity isolation", () => {
       "fetch",
       vi.fn(async (url: string, options: RequestInit) => {
         if (url === "/api/auth/refresh")
-          return json({ token: "T2", username: "alice" });
+          return json({
+            token: "T2",
+            username: "alice",
+            user: { id: "alice", username: "alice", platform_role: "member" },
+          });
         const headers = new Headers(options.headers);
         sent.push({
           token: headers.get("Authorization"),
@@ -147,6 +152,34 @@ describe("skill transport identity isolation", () => {
       { token: "Bearer T2", agent: "a" },
     ]);
     expect(outcome).toBe("enabled");
+  });
+
+  it("invalidates the captured scope when refresh demotes the same user", async () => {
+    useAuthStore.setState({
+      user: { id: "alice", username: "alice", platform_role: "admin" } as never,
+    });
+    const scope = captureSkillScope();
+    expect(scope.isAdmin).toBe(true);
+    const sent: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, options: RequestInit) => {
+        if (url === "/api/auth/refresh")
+          return json({
+            token: "T2",
+            username: "alice",
+            user: { id: "alice", username: "alice", platform_role: "member" },
+          });
+        sent.push(new Headers(options.headers).get("Authorization")!);
+        return new Response("", { status: 401 });
+      }),
+    );
+
+    await expect(skillApi.enableSkill("demo")).rejects.toThrow();
+    expect(sent).toEqual(["Bearer session-alice"]);
+    expect(useAuthStore.getState().user?.platform_role).toBe("member");
+    expect(scope.current()).toBe(false);
+    expect(captureSkillScope().isAdmin).toBe(false);
   });
 
   it.each(["scoped skill", "admin auxiliary"])(

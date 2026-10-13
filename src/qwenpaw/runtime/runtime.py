@@ -28,6 +28,7 @@ from .message_convert import _get_last_user_text, _request_input_to_msgs
 from .phases import Phase
 from ..runtime_status.broadcast import broadcast_runtime_status
 from ..runtime_status.stream_events import emit_runtime_final_status
+from ..runtime_status.scope import execution_user_id
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +63,7 @@ class Runtime:
         ctx._envelope = envelope  # pylint: disable=protected-access
         skip_agent = False
         artifacts_collected = False
+        terminal_status_emitted = False
 
         try:
             # --- [phase 1] PRE_DISPATCH ---
@@ -102,6 +104,15 @@ class Runtime:
                     skip_agent = True
 
             if not skip_agent:
+                from .skill_routing import skill_routing_response
+
+                skill_response = skill_routing_response(ctx)
+                if skill_response is not None:
+                    async for ev in envelope.from_msg(skill_response):
+                        yield ev
+                    skip_agent = True
+
+            if not skip_agent:
                 # --- [fixed 2] build agent ---
                 builder = AgentBuilder(
                     app_services=self.app_services,
@@ -138,6 +149,9 @@ class Runtime:
                     yield ev
 
             # --- [phase 6] POST_RESPONSE ---
+            from .skill_routing import finish_skill_request
+
+            finish_skill_request(ctx)
             await hooks.run(Phase.POST_RESPONSE, ctx)
 
             from ..artifacts.middleware import collect_safely
@@ -150,6 +164,8 @@ class Runtime:
                 artifacts_collected = True
 
             # Finalize envelope (complete message + response).
+            self._emit_final_status(ctx)
+            terminal_status_emitted = True
             async for ev in envelope.finalize():
                 yield ev
 
@@ -214,13 +230,8 @@ class Runtime:
                 await collect_safely(
                     getattr(ctx.agent, "_request_context", None) or request_context,
                 )
-            emit_runtime_final_status(
-                partial(broadcast_runtime_status, ctx.agent_id),
-                session_id=ctx.session_id,
-                root_session_id=ctx.root_session_id,
-                chat_id=request_context.get("chat_id"),
-                error=ctx.error,
-            )
+            if not terminal_status_emitted:
+                self._emit_final_status(ctx)
             # Close agent first so governor can flush audit log and persist
             # policy before downstream FINALLY hooks observe the context.
             # See ``QwenPawAgent.close`` (agents/react_agent.py).
@@ -237,6 +248,23 @@ class Runtime:
             await hooks.run(Phase.FINALLY, ctx)
 
     # ----------------------------------------------------------------- helpers
+
+    @staticmethod
+    def _emit_final_status(ctx: HookContext) -> None:
+        context = (
+            getattr(getattr(ctx, "agent", None), "_request_context", None)
+            or getattr(ctx.request, "request_context", None) or {}
+        )
+        emit_runtime_final_status(
+            partial(
+                broadcast_runtime_status, ctx.agent_id,
+                user_id=execution_user_id(context),
+            ),
+            session_id=ctx.session_id,
+            root_session_id=ctx.root_session_id,
+            chat_id=context.get("chat_id"),
+            error=ctx.error,
+        )
 
     async def _start_modes(self, ctx: HookContext) -> None:
         """Prepare every registered mode for the current user turn."""

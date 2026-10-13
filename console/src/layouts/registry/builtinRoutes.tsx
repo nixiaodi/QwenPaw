@@ -20,7 +20,7 @@ import type { Route } from "../../plugins/registry/types";
 import { Capability } from "../../access/capabilities";
 
 // Eager pages
-import Chat from "../../pages/Chat";
+import Chat from "../../pages/Chat/route";
 
 // Lazy pages
 const ChannelsPage = lazyImportWithRetry("../../pages/Control/Channels");

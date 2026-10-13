@@ -441,7 +441,14 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
 
   // ── Handlers ──────────────────────────────────────────────────────────────
 
+  const navigateToChat = () =>
+    navigate(chatPath, { state: { chatAgentId: selectedAgent } });
+
   const handleMenuClick = (key: string, allItems: MenuItem[]) => {
+    if (key === "core.chat") {
+      navigateToChat();
+      return;
+    }
     const item = findMenuItem(allItems, key);
     if (item?.href) {
       window.open(item.href, "_blank", "noopener,noreferrer");
@@ -475,9 +482,9 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
     (sessionId: string) => {
       const effectiveId = sessionApi.getEffectiveSessionId(sessionId);
       const targetPath = buildChatPath(effectiveId);
-      navigate(targetPath);
+      navigate(targetPath, { state: { chatAgentId: selectedAgent } });
     },
-    [navigate],
+    [navigate, selectedAgent],
   );
 
   const handleUpdateProfile = async (values: {
@@ -606,6 +613,8 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
                   onClick={() => {
                     if (item.href) {
                       window.open(item.href, "_blank", "noopener,noreferrer");
+                    } else if (item.key === "core.chat") {
+                      navigateToChat();
                     } else {
                       navigate(item.path);
                     }
@@ -648,6 +657,8 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
                           "_blank",
                           "noopener,noreferrer",
                         );
+                      } else if (entry.key === "core.chat") {
+                        navigateToChat();
                       } else {
                         navigate(entry.path);
                       }
@@ -705,7 +716,7 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
                 className={`${styles.stickyChatButton}${
                   isChatActive ? ` ${styles.stickyChatButtonActive}` : ""
                 }`}
-                onClick={() => navigate(chatPath)}
+                onClick={navigateToChat}
               >
                 <SparkChatTabFill size={16} />
                 <span>{t("nav.chat")}</span>

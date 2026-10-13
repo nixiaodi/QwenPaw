@@ -38,6 +38,45 @@ def _msg(role: str, text: str, *, name: str | None = None, msg_id: str = ""):
 
 
 @pytest.mark.asyncio
+async def test_manual_memorize_returns_observed_completion():
+    agent = _make_agent()
+    agent.state.context = [_msg("user","Remember my preferences"), _msg("assistant","Acknowledged",msg_id="r1")]
+    manager = SimpleNamespace(auto_memory=AsyncMock(return_value="已更新记忆文件：note.md"))
+    handler = CommandHandler(agent_name="QwenPaw",agent=agent,memory_manager=manager)
+    result = await handler.handle_command("/memorize")
+    assert manager.auto_memory.await_args.kwargs["_manual_memory"] is True
+    assert "note.md" in result.get_text_content()
+
+
+@pytest.mark.asyncio
+async def test_manual_memorize_failure_notifies_the_trusted_user(monkeypatch):
+    agent = _make_agent()
+    agent.state.context = [_msg("user","remember"),_msg("assistant","ok",msg_id="r1")]
+    manager = SimpleNamespace(auto_memory=AsyncMock(side_effect=RuntimeError("model unavailable")))
+    append = AsyncMock()
+    monkeypatch.setattr("qwenpaw.app.inbox_store.append_event",append)
+    handler = CommandHandler(agent_name="QwenPaw",agent=agent,agent_id="default",memory_manager=manager,actor_user_id="trusted-user",source_conversation_id="de307e1e-a799-4323-8fbb-4699dea2990c")
+    response = await handler.handle_command("/memorize")
+    assert "Auto-memory Failed" in response.get_text_content()
+    append.assert_awaited_once()
+    assert append.await_args.kwargs["recipient_user_id"] == "trusted-user"
+    assert append.await_args.kwargs["payload"]["source_conversation_id"] == "de307e1e-a799-4323-8fbb-4699dea2990c"
+
+
+@pytest.mark.asyncio
+async def test_manual_memory_failure_does_not_duplicate_existing_notification(monkeypatch):
+    agent=_make_agent()
+    agent.state.context=[_msg("user","remember"),_msg("assistant","ok",msg_id="r1")]
+    error=RuntimeError("Memory job failed")
+    error._memory_notification_sent=True
+    append=AsyncMock()
+    monkeypatch.setattr("qwenpaw.app.inbox_store.append_event",append)
+    handler=CommandHandler(agent_name="QwenPaw",agent=agent,agent_id="default",memory_manager=SimpleNamespace(auto_memory=AsyncMock(side_effect=error)),actor_user_id="trusted-user")
+    await handler.handle_command("/memorize")
+    append.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_process_clear_returns_clear_history_metadata() -> None:
     agent = _make_agent()
     handler = CommandHandler(agent_name="QwenPaw", agent=agent)
@@ -362,6 +401,7 @@ async def test_memorize_defaults_to_latest_reply_group() -> None:
         "session_id": "session-1",
         "reply_id": "r2",
         "reply_ids": ["r2"],
+        "_manual_memory": True,
         "actor_user_id": "user-1",
         "_source_conversation_id": "de307e1e-a799-4323-8fbb-4699dea2990c",
     }

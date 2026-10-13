@@ -977,6 +977,7 @@ class CommandHandler(ConversationCommandHandlerMixin):
                 "session_id": self._current_session_id(),
                 "reply_id": reply_ids[-1],
                 "reply_ids": reply_ids,
+                "_manual_memory": True,
             }
             if self._source_conversation_id:
                 kwargs["_source_conversation_id"] = (
@@ -988,7 +989,7 @@ class CommandHandler(ConversationCommandHandlerMixin):
                 None,
             )
             if self._actor_user_id and callable(scoped_auto_memory):
-                await scoped_auto_memory(
+                result = await scoped_auto_memory(
                     messages=memory_messages,
                     actor_user_id=self._actor_user_id,
                     **kwargs,
@@ -996,20 +997,33 @@ class CommandHandler(ConversationCommandHandlerMixin):
             else:
                 if self._actor_user_id:
                     kwargs["actor_user_id"] = self._actor_user_id
-                await self.memory_manager.auto_memory(
+                result = await self.memory_manager.auto_memory(
                     memory_messages,
                     **kwargs,
                 )
         except Exception as e:
             logger.exception("manual auto-memory failed: %s", e)
+            if self._actor_user_id and not getattr(e, "_memory_notification_sent", False):
+                try:
+                    from ..app.inbox_store import append_event as append_inbox_event
+                    await append_inbox_event(
+                        agent_id=self._agent_id, source_type="memory", source_id="auto_memory",
+                        event_type="auto_memory_result", status="error", severity="error",
+                        title="手动记忆处理失败", body=str(e),
+                        payload={"source_conversation_id": self._source_conversation_id, "memory_files": []},
+                        recipient_user_id=str(self._actor_user_id),
+                    )
+                except Exception:
+                    logger.warning("manual memory failure notification failed", exc_info=True)
             return await self._make_system_msg(
                 f"**Auto-memory Failed**\n\n- Error: {e}",
             )
 
         return await self._make_system_msg(
-            "**Auto-memory Started**\n\n"
+            "**Auto-memory Completed**\n\n"
             f"- Reply groups: {len(reply_ids)}\n"
-            f"- Messages submitted: {len(memory_messages)}",
+            f"- Messages submitted: {len(memory_messages)}\n\n"
+            + (result if isinstance(result, str) else "记忆处理已结束，请在收件箱查看结果。"),
         )
 
     def _latest_reply_ids(
@@ -1299,6 +1313,8 @@ class CommandHandler(ConversationCommandHandlerMixin):
         # Parse command and arguments
         parts = query.strip().lstrip("/").split(" ", maxsplit=1)
         command = parts[0]
+        if command == "mermorize":
+            command = "memorize"
         args = parts[1] if len(parts) > 1 else ""
         # Command arguments are user-controlled and may contain credentials
         # (for example, a /compact hint containing an API key).  Do not log

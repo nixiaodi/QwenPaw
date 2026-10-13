@@ -17,6 +17,32 @@ from qwenpaw.memory_scope.models import MemoryScopeDenied
 USER_ID = UUID("11111111-1111-4111-8111-111111111111")
 
 
+@pytest.mark.asyncio
+async def test_scheduled_public_dream_receives_explicit_model_authority():
+    manager=ReMeLightMemoryManager.__new__(ReMeLightMemoryManager)
+    manager.dream=AsyncMock()
+    authority=object()
+    manager._public_model_job_kwargs=AsyncMock(return_value={"_model_authority":authority,"recipient_user_id":str(USER_ID)})
+    await manager.public_dream()
+    assert manager.dream.await_args.kwargs["_model_authority"] is authority
+    assert manager.dream.await_args.kwargs["memory_scope"] == "public"
+
+
+@pytest.mark.asyncio
+async def test_public_memory_job_builds_authority_from_current_owner(monkeypatch):
+    from qwenpaw.identity.models import PlatformRole
+    monkeypatch.setattr("qwenpaw.identity.runtime.is_multi_user_enabled",lambda:True)
+    monkeypatch.setattr("qwenpaw.access.agent_repository.PostgresAgentRepository.get_governance",AsyncMock(return_value=SimpleNamespace(status="active",owner_user_id=USER_ID)))
+    monkeypatch.setattr("qwenpaw.identity.repository.PostgresUserRepository.get_user",AsyncMock(return_value=SimpleNamespace(id=USER_ID,status="active",platform_role=PlatformRole.MEMBER)))
+    monkeypatch.setattr("qwenpaw.agents.memory.reme_light_memory_manager.load_agent_config_async",AsyncMock(return_value=SimpleNamespace()))
+    monkeypatch.setattr("qwenpaw.models.runtime.resolve_selection",AsyncMock(return_value={"active_llm":{"provider_id":"fixture","model":"fixture"}}))
+    manager=ReMeLightMemoryManager.__new__(ReMeLightMemoryManager)
+    manager.agent_id="agent-a"
+    kwargs=await manager._public_model_job_kwargs()
+    assert kwargs["_model_authority"][0].user_id == USER_ID
+    assert kwargs["recipient_user_id"] == str(USER_ID)
+
+
 class _RuntimePool:
     def __init__(self, runtime) -> None:
         self.runtime = runtime

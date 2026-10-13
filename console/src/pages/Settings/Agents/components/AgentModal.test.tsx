@@ -50,7 +50,7 @@ vi.mock("@/api/modules/modelCatalog", () => ({
 }));
 
 vi.mock("@/api/modules/skill", async (importOriginal) => ({
-  ...await importOriginal<typeof import("@/api/modules/skill")>(),
+  ...(await importOriginal<typeof import("@/api/modules/skill")>()),
   skillApi: {
     listSkillPoolSkills: vi.fn().mockResolvedValue([]),
     listSkills: vi.fn().mockResolvedValue([]),
@@ -76,6 +76,12 @@ function ModalHarness({ editingAgent }: { editingAgent: AgentSummary | null }) {
     />
   );
 }
+
+it("creates a native agent without offering third-party backends", async () => {
+  renderWithProviders(<ModalHarness editingAgent={null} />);
+  await waitFor(() => expect(screen.queryByText("Codex")).toBeNull());
+  expect(screen.queryByText("Qoder")).toBeNull();
+});
 
 describe("AgentModal model inheritance", () => {
   it("keeps authorized models when the platform default is forbidden", async () => {

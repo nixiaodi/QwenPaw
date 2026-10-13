@@ -1,5 +1,6 @@
+import { ProviderAvailabilityAction } from "./ProviderAvailabilityAction";
 import React, { useState } from "react";
-import { Button, Input, Modal } from "@agentscope-ai/design";
+import { Button, Input } from "@agentscope-ai/design";
 import { useTranslation } from "react-i18next";
 import type { ProviderInfo } from "../../../../../api/types";
 import type { ProviderGroup } from "../../utils";
@@ -45,7 +46,9 @@ export const ProviderGroupCard = React.memo(function ProviderGroupCard({
   const activeProvider = group.providers[activeIdx] || group.providers[0];
   const totalModels =
     activeProvider.models.length + activeProvider.extra_models.length;
-  const liveCount = group.providers.filter(getIsConfigured).length;
+  const liveCount = group.providers.filter(
+    (provider) => provider.enabled !== false && getIsConfigured(provider),
+  ).length;
   const hasFreeTier = group.providers.some((p) => p.is_free_tier);
 
   const handleSaveKey = async () => {
@@ -72,6 +75,9 @@ export const ProviderGroupCard = React.memo(function ProviderGroupCard({
       <div className={styles.groupCardHeader}>
         <ProviderIcon providerId={group.providers[0]?.id ?? ""} size={36} />
         <span className={styles.groupCardName}>{group.groupName}</span>
+        {activeProvider.enabled === false && (
+          <span className={styles.customTag}>{t("common.disabled")}</span>
+        )}
         {hasFreeTier && <span className={styles.freeTag}>FREE</span>}
         {liveCount > 0 && (
           <div className={styles.groupCardLiveBadge}>
@@ -84,7 +90,8 @@ export const ProviderGroupCard = React.memo(function ProviderGroupCard({
       {/* Segmented Control */}
       <div className={styles.groupSegmented}>
         {group.providers.map((provider, idx) => {
-          const configured = getIsConfigured(provider);
+          const configured =
+            provider.enabled !== false && getIsConfigured(provider);
           const label =
             VARIANT_LABELS[provider.provider_variant || ""] || provider.name;
           return (
@@ -185,44 +192,10 @@ export const ProviderGroupCard = React.memo(function ProviderGroupCard({
         >
           {t("models.settings")}
         </button>
-        {getIsConfigured(activeProvider) &&
-          activeProvider.require_api_key !== false && (
-            <button
-              className={`${styles.groupCardActBtn} ${styles.groupCardActBtnDanger}`}
-              onClick={() => {
-                Modal.confirm({
-                  title: t("models.disableProvider"),
-                  content: t("models.disableProviderConfirm", {
-                    name: activeProvider.name,
-                  }),
-                  okText: t("models.disableBtn"),
-                  okButtonProps: { danger: true },
-                  cancelText: t("models.cancel"),
-                  onOk: async () => {
-                    try {
-                      await providerApi.configureProvider(activeProvider.id, {
-                        api_key: "",
-                      });
-                      message.success(
-                        t("models.providerDisabled", {
-                          name: activeProvider.name,
-                        }),
-                      );
-                      onSaved();
-                    } catch (err) {
-                      const msg =
-                        err instanceof Error
-                          ? err.message
-                          : t("models.failedToSave");
-                      message.error(msg);
-                    }
-                  },
-                });
-              }}
-            >
-              {t("models.disableBtn")}
-            </button>
-          )}
+        <ProviderAvailabilityAction
+          provider={activeProvider}
+          onSaved={onSaved}
+        />
       </div>
     </div>
   );

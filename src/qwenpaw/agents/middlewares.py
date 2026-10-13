@@ -22,6 +22,15 @@ from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable, Iterator, Set
 
 from agentscope.middleware import MiddlewareBase
+from agentscope.event import (
+    EventType,
+    ToolCallStartEvent,
+    ToolCallDeltaEvent,
+    ToolCallEndEvent,
+    ToolResultStartEvent,
+    ToolResultTextDeltaEvent,
+    ToolResultEndEvent,
+)
 from agentscope.message import Msg
 from agentscope.tool import ToolResponse
 
@@ -171,6 +180,68 @@ class MemoryMiddleware(MiddlewareBase):
                 turn_marker=turn_marker,
             )
         return await next_handler(**input_kwargs)
+
+    async def on_reasoning(
+        self,
+        agent: "Agent",
+        input_kwargs: dict[str, Any],
+        next_handler: Callable[..., AsyncGenerator[Any, None]],
+    ) -> AsyncGenerator[Any, None]:
+        """Expose actual automatic recall through the normal tool event stream."""
+        async for event in next_handler(**input_kwargs):
+            # ModelCallStart is yielded before on_model_call searches. Wait
+            # until evidence is ready, then report it before the model output.
+            if (
+                not isinstance(event, Msg)
+                and event.type != EventType.MODEL_CALL_START
+                and not self._is_automation_request(agent)
+            ):
+                query = self._latest_external_user_query(agent.state.context)
+                marker = query.id if query is not None else ""
+                turn_state = self._auto_memory_turn_state(agent)
+                search = turn_state["search"]
+                reply_id = str(agent.state.reply_id or "")
+                if reply_id and search.get("reported_reply_id") != reply_id:
+                    messages = self._load_search_cache(
+                        turn_state,
+                        turn_marker=marker,
+                    )
+                    for message in messages:
+                        for call in message.get_content_blocks("tool_call"):
+                            if call.name != "memory_search":
+                                continue
+                            result = next(
+                                (
+                                    block
+                                    for block in message.get_content_blocks("tool_result")
+                                    if block.id == call.id
+                                ),
+                                None,
+                            )
+                            if result is None:
+                                continue
+                            fields = {"reply_id": reply_id, "tool_call_id": call.id}
+                            yield ToolCallStartEvent(
+                                **fields, tool_call_name=call.name,
+                            )
+                            yield ToolCallDeltaEvent(**fields, delta=call.input)
+                            yield ToolCallEndEvent(**fields)
+                            yield ToolResultStartEvent(
+                                **fields, tool_call_name=call.name,
+                            )
+                            for block in result.output:
+                                if getattr(block, "type", None) == "text":
+                                    yield ToolResultTextDeltaEvent(
+                                        **fields, delta=block.text,
+                                    )
+                            yield ToolResultEndEvent(
+                                **fields,
+                                state=result.state,
+                                metadata={"qwenpaw_auto_memory_search": True},
+                            )
+                    if messages:
+                        search["reported_reply_id"] = reply_id
+            yield event
 
     # pylint: disable=stop-iteration-return
     async def on_reply(

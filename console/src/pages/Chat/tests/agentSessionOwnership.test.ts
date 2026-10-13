@@ -77,6 +77,18 @@ afterEach(() => {
 });
 
 describe("agent session ownership epochs", () => {
+  it("drops the previous agent's restore target when switching outside the chat page", () => {
+    sessionApi.setActiveAgent("agent-a");
+    sessionApi.lastActiveChatId = A_CHAT;
+    sessionApi.preferredChatId = A_CHAT;
+    sessionApi.lastNavigatedChatId = A_CHAT;
+    (window as { currentSessionId?: string }).currentSessionId = "old-session";
+    sessionApi.setActiveAgent("agent-b");
+    expect(sessionApi.lastActiveChatId).toBeNull();
+    expect(sessionApi.preferredChatId).toBeNull();
+    expect(sessionApi.lastNavigatedChatId).toBeNull();
+    expect((window as { currentSessionId?: string }).currentSessionId).toBe("");
+  });
   it("clears stale SDK messages when the user explicitly creates a chat", async () => {
     sessionApi.setActiveAgent("agent-a");
     sessionApi.userInitiatedCreate = true;

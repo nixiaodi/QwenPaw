@@ -15,7 +15,7 @@ import logging
 import re
 import uuid
 from pathlib import Path
-from typing import Any, Literal, Optional, TYPE_CHECKING
+from typing import Any, Optional, TYPE_CHECKING
 
 from agentscope.agent import Agent, ReActConfig
 from agentscope.event import (
@@ -27,7 +27,7 @@ from agentscope.event import (
 from agentscope.message import HintBlock, Msg, TextBlock
 from agentscope.model import FinishedReason
 from agentscope.state import AgentState
-from agentscope.tool import Toolkit
+from agentscope.tool import Toolkit, ToolChoice
 
 from .context.base import ContextManager
 from .skill_system import get_workspace_skills_dir
@@ -982,7 +982,7 @@ class QwenPawAgent(CodingModeMixin, Agent):
     # pylint: disable=too-many-branches,too-many-statements
     async def _reasoning(
         self,
-        tool_choice: Literal["auto", "none", "required"] | None = None,
+        tool_choice: ToolChoice | None = None,
     ):
         """Forward 2.0 ``_reasoning`` events with proactive media
         stripping, passive bad-request retry, and auto-continue on
@@ -990,6 +990,17 @@ class QwenPawAgent(CodingModeMixin, Agent):
 
         # ── Inject background-tool results before each reasoning step ──
         await self._inject_pending_hints()
+
+        image_guard = getattr(self, "_delivery_guard", None)
+        buffered_text: list[Any] = []
+        if image_guard is not None:
+            if getattr(image_guard, "force_initial_tool", True) and not image_guard.has_tool_calls and getattr(tool_choice, "mode", None) != "none":
+                tool_choice = ToolChoice(mode="required")
+
+        def should_buffer(evt: Any) -> bool:
+            return image_guard is not None and isinstance(
+                evt, (TextBlockStartEvent, TextBlockDeltaEvent, TextBlockEndEvent),
+            )
 
         # ── Pre-check: pending gate actions from previous iter ──
         from ..loop.gates.runner import check_pending_gates
@@ -1071,6 +1082,8 @@ class QwenPawAgent(CodingModeMixin, Agent):
                 acknowledge_seen_results(evt)
                 if isinstance(evt, Msg):
                     final_msg = evt
+                elif should_buffer(evt):
+                    buffered_text.append(evt)
                 else:
                     yield evt
         except Exception as e:
@@ -1100,6 +1113,8 @@ class QwenPawAgent(CodingModeMixin, Agent):
                     acknowledge_seen_results(evt)
                     if isinstance(evt, Msg):
                         final_msg = evt
+                    elif should_buffer(evt):
+                        buffered_text.append(evt)
                     else:
                         yield evt
                 if model_key and learn_global_rejection:
@@ -1117,6 +1132,33 @@ class QwenPawAgent(CodingModeMixin, Agent):
 
         # ── Stop Hook: run every iteration ──
         stop_result = await self._run_stop_handlers(final_msg)
+
+        if image_guard is not None and final_msg is not None:
+            image_result = image_guard.check(
+                final_msg,
+                allow_retry=not (
+                    stop_result.action == StopAction.TERMINATE and stop_result.reason
+                ),
+            )
+            if image_result.action != StopAction.BYPASS:
+                stop_result = image_result
+                # The model has already saved its answer. Do not persist a
+                # fabricated completion while we continue or report failure.
+                replacement = image_result.final_message
+                final_msg.content = replacement.content if replacement else [
+                    TextBlock(text="任务产物尚未完成，继续执行工具。"),
+                ]
+                last_message = self._get_last_msg()
+                if last_message is not None:
+                    last_message.content = list(final_msg.content)
+                buffered_text.clear()
+                if replacement is not None:
+                    block_id = uuid.uuid4().hex
+                    buffered_text.extend([
+                        TextBlockStartEvent(reply_id=self.state.reply_id, block_id=block_id),
+                        TextBlockDeltaEvent(reply_id=self.state.reply_id, block_id=block_id, delta=replacement.get_text_content()),
+                        TextBlockEndEvent(reply_id=self.state.reply_id, block_id=block_id),
+                    ])
 
         if final_msg is None:
             from ..loop.gates.runner import apply_stop_result
@@ -1156,6 +1198,8 @@ class QwenPawAgent(CodingModeMixin, Agent):
             )
             return  # outer loop continues
 
+        for evt in buffered_text:
+            yield evt
         yield stop_result.final_message or final_msg
 
     @staticmethod

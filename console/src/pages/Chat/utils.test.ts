@@ -3,6 +3,7 @@ import {
   extractCopyableText,
   extractUserMessageText,
   buildModelError,
+  buildModelLoadError,
   toStoredName,
   normalizeContentUrls,
   toDisplayUrl,
@@ -210,6 +211,13 @@ describe("clearSubmittedSenderInput", () => {
 // buildModelError
 // ---------------------------------------------------------------------------
 describe("buildModelError", () => {
+  it("does not mislabel an authentication or network failure as missing model", async () => {
+    const response = buildModelLoadError(new Error("Not authenticated"));
+    const body = await response.json();
+    expect(body.detail).toBe("Not authenticated");
+    expect(JSON.stringify(body)).not.toContain("Model not configured");
+    expect(response.status).toBe(503);
+  });
   it("returns 400 status code", () => {
     const response = buildModelError();
     expect(response.status).toBe(400);

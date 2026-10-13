@@ -25,6 +25,24 @@ class Attachments:
 
 
 @pytest.mark.asyncio
+async def test_generated_word_document_can_be_mentioned_and_extracted(tmp_path):
+    from docx import Document
+    owner = uuid4()
+    service = ArtifactService(repository=ArtifactRepository(), working_dir=tmp_path)
+    workspace = WorkspaceResolver(working_dir=tmp_path)
+    root = workspace.ensure_standard_directories(workspace.resolve(kind=WorkspaceKind.USER_RUNTIME, resource_id="a", actor_user_id=owner))
+    source = root / "report.docx"
+    document = Document()
+    document.add_paragraph("Generated report content")
+    document.save(source)
+    artifact = await service.publish(owner_user_id=owner, agent_key="a", source=source)
+    resolver = ChatFileReferences(owner=owner, agent_key="a", conversation_id="", profile_root=tmp_path, library=None, attachments=None, artifacts=service)
+    assert any(item["id"] == str(artifact.id) for item in await resolver.catalog())
+    result = await resolver.resolve([{"source":"artifact", "id":str(artifact.id)}])
+    assert "Generated report content" in result[0]["content"]
+
+
+@pytest.mark.asyncio
 async def test_library_mentions_require_same_owner_and_agent_scope(tmp_path):
     owner, other = uuid4(), uuid4()
     repository = GrantRepository()

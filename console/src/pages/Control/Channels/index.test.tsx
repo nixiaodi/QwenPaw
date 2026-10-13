@@ -37,7 +37,13 @@ vi.mock("../../../hooks/useAppMessage", () => ({
 }));
 
 vi.mock("@/components/PageHeader", () => ({
-  PageHeader: ({ center, extra }: { center?: React.ReactNode; extra?: React.ReactNode }) => (
+  PageHeader: ({
+    center,
+    extra,
+  }: {
+    center?: React.ReactNode;
+    extra?: React.ReactNode;
+  }) => (
     <header>
       {center}
       {extra}
@@ -53,9 +59,13 @@ vi.mock("@agentscope-ai/design", () => ({
 
 vi.mock("antd", () => ({
   Badge: ({ children }: { children: React.ReactNode }) => <>{children}</>,
-  Button: ({ children, onClick }: { children: React.ReactNode; onClick?: () => void }) => (
-    <button onClick={onClick}>{children}</button>
-  ),
+  Button: ({
+    children,
+    onClick,
+  }: {
+    children: React.ReactNode;
+    onClick?: () => void;
+  }) => <button onClick={onClick}>{children}</button>,
   Space: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
 }));
 
@@ -97,8 +107,29 @@ describe("ChannelsPage personal binding mode", () => {
     render(<ChannelsPage />);
 
     expect(screen.getByText("channels.myBindings")).toBeInTheDocument();
-    expect(screen.queryByText("channels.agentChannels")).not.toBeInTheDocument();
-    expect(screen.queryByText("channels.manageAccessControl")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("channels.agentChannels"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("channels.manageAccessControl"),
+    ).not.toBeInTheDocument();
+    expect(useChannelsMock).toHaveBeenCalledWith("user");
+  });
+
+  it("Agent owners also see only their own channel bindings", () => {
+    state.agents = [
+      { id: "public-agent", access_role: "owner", can_edit: true },
+    ];
+    render(<ChannelsPage />);
+
+    expect(screen.getByText("channels.myBindings")).toBeInTheDocument();
+    expect(
+      screen.queryByText("channels.agentChannels"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("channels.manageAccessControl"),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("channels.filterAll")).not.toBeInTheDocument();
     expect(useChannelsMock).toHaveBeenCalledWith("user");
   });
 });

@@ -44,7 +44,6 @@ from ...utils.io_utils import run_sync_io
 from ..agent_context import (
     get_agent_access_state,
     get_agent_for_request,
-    get_files_workspace_access,
 )
 from ..approvals.display import approval_display_fields
 from ..chats.access import (
@@ -208,14 +207,21 @@ async def _resolve_console_upload_dir(
     *,
     legacy_media_dir: Path,
 ) -> Path:
-    """仅使用用户的聊天附件保存到个人运行空间。"""
-    from ...access.agent_repository import AgentResourceRole
-
-    role, historical_read_only = get_agent_access_state(request)
-    if role is not AgentResourceRole.USER or historical_read_only:
+    """所有登录用户的聊天附件都保存到个人运行空间。"""
+    if not is_multi_user_enabled():
         return legacy_media_dir
-    access = await get_files_workspace_access(request, workspace)
-    return access.project.path / "media"
+    _, historical_read_only = get_agent_access_state(request)
+    if historical_read_only:
+        raise HTTPException(status_code=403, detail="Historical workspace is read-only")
+    actor = get_actor(request)
+    if actor.user_id is None:
+        raise HTTPException(status_code=401, detail="not_authenticated")
+    from ..attachments.service import resolve_attachment_runtime_root
+
+    root = await resolve_attachment_runtime_root(
+        user_id=actor.user_id, agent_key=workspace.agent_id,
+    )
+    return root / "media"
 
 
 async def _resolve_console_chat(

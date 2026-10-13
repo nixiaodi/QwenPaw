@@ -6,8 +6,15 @@ import {
   type AuthUser,
   type UserProfileInput,
 } from "../api/modules/auth";
-import { setApiAuthMode } from "../api/config";
-import { adoptAccessSession, clearAccessSession } from "../api/authSession";
+import { getApiToken, setApiAuthMode } from "../api/config";
+import { withSessionRefreshLock } from "../api/authSessionSync";
+import {
+  adoptAccessSession,
+  clearAccessSession,
+  restoreAccessSession,
+  subscribeAccessSessionGeneration,
+  subscribeAccessSessionUpdates,
+} from "../api/authSession";
 import { useAgentStore } from "./agentStore";
 import { useMessageQueueStore } from "./messageQueueStore";
 import { useBackgroundTasksStore } from "./backgroundTasksStore";
@@ -158,22 +165,20 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
         return;
       }
       if (mode === "multi_user") {
-        const response = await authApi.refresh();
-        adoptAccessSession(response);
-        const identity = await loadIdentity();
+        const { identity } = await restoreAccessSession(loadIdentity);
         adoptAuthenticatedUser(identity.user.id);
         set({
           phase: "authenticated",
           user: identity.user,
           preferences: identity.preferences,
-          accessToken: response.token,
+          accessToken: getApiToken(),
         });
         return;
       }
       await authApi.verify();
       set({ phase: "authenticated" });
     } catch {
-      clearAccessSession();
+      clearAccessSession(false);
       set({
         phase: "anonymous",
         user: null,
@@ -185,11 +190,16 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
   },
 
   login: async (username, password) => {
-    const response = await authApi.login(username, password);
-    setApiAuthMode(get().mode);
-    adoptAccessSession(response);
+    const { response, identity } = await withSessionRefreshLock(async () => {
+      const response = await authApi.login(username, password);
+      setApiAuthMode(get().mode);
+      adoptAccessSession(response);
+      const identity =
+        get().mode === "multi_user" ? await loadIdentity() : null;
+      return { response, identity };
+    });
     if (get().mode === "multi_user") {
-      const identity = await loadIdentity();
+      if (!identity) throw new Error("Unable to load account");
       adoptAuthenticatedUser(identity.user.id);
       set({
         phase: "authenticated",
@@ -203,10 +213,14 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
   },
 
   register: async (username, password) => {
-    const response = await authApi.register(username, password);
-    setApiAuthMode(get().mode);
-    adoptAccessSession(response);
-    const identity = get().mode === "multi_user" ? await loadIdentity() : null;
+    const { response, identity } = await withSessionRefreshLock(async () => {
+      const response = await authApi.register(username, password);
+      setApiAuthMode(get().mode);
+      adoptAccessSession(response);
+      const identity =
+        get().mode === "multi_user" ? await loadIdentity() : null;
+      return { response, identity };
+    });
     if (identity) adoptAuthenticatedUser(identity.user.id);
     set({
       phase: "authenticated",
@@ -218,7 +232,7 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
 
   logout: async () => {
     if (get().mode === "multi_user") {
-      await authApi.logout();
+      await withSessionRefreshLock(() => authApi.logout());
     }
     clearAccessSession();
     resetUserScopedClientState();
@@ -276,3 +290,39 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
     set(initialState);
   },
 }));
+
+subscribeAccessSessionGeneration(() => {
+  if (useAuthStore.getState().mode !== "multi_user") return;
+  resetUserScopedClientState();
+  useAuthStore.setState({
+    phase: "anonymous",
+    user: null,
+    preferences: null,
+    sessions: [],
+    accessToken: "",
+  });
+});
+
+subscribeAccessSessionUpdates((session) => {
+  const current = useAuthStore.getState();
+  if (current.mode !== "multi_user") return;
+  if (
+    current.phase !== "loading" &&
+    session.user &&
+    current.user?.id !== session.user.id
+  ) {
+    resetUserScopedClientState(session.user.id);
+    useAuthStore.setState({
+      phase: "loading",
+      user: null,
+      preferences: null,
+      sessions: [],
+      accessToken: session.token,
+    });
+    return;
+  }
+  useAuthStore.setState({
+    accessToken: session.token,
+    ...(session.user ? { user: session.user } : {}),
+  });
+});

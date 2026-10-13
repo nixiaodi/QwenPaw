@@ -89,7 +89,9 @@ function AgentModalBody({
   const governance = useMemo(() => createSkillGovernanceApi(scope), [scope]);
   const skillApi = useMemo(() => createSkillApi(scope), [scope]);
   const [skillError, setSkillError] = useState("");
-  const [poolSkills, setPoolSkills] = useState<Array<Pick<SkillCatalogItem, "name">>>([]);
+  const [poolSkills, setPoolSkills] = useState<
+    Array<Pick<SkillCatalogItem, "name">>
+  >([]);
   const [installedSkills, setInstalledSkills] = useState<string[]>([]);
   const [loadingSkills, setLoadingSkills] = useState(false);
   const [providers, setProviders] = useState<EligibleProvider[]>([]);
@@ -100,6 +102,10 @@ function AgentModalBody({
   const selectedProviderId = Form.useWatch("active_model_provider", form);
   const selectedModelId = Form.useWatch("active_model_model", form);
   const selectedBackend = Form.useWatch("backend", form) ?? "qwenpaw";
+  useEffect(() => {
+    if (open && !editingAgent)
+      form.setFieldsValue({ backend: "qwenpaw", backend_settings: {} });
+  }, [open, editingAgent, form]);
   const modelReadOnly = Boolean(
     editingAgent && editingAgent.can_edit === false && !governanceMode,
   );
@@ -153,11 +159,20 @@ function AgentModalBody({
     setSkillError("");
     onSelectedSkillsChange([]);
     onInstalledSkillsLoaded([]);
-    if (!governanceMode && (scope.multiUser ? editingAgent && scope.canEdit : scope.ready && (!editingAgent || scope.canEdit))) {
+    if (
+      !governanceMode &&
+      (scope.multiUser
+        ? editingAgent && scope.canEdit
+        : scope.ready && (!editingAgent || scope.canEdit))
+    ) {
       setLoadingSkills(true);
       void Promise.all([
-        scope.multiUser ? governance.catalog() : skillApi.listSkillPoolSkills().then(items => ({ items })),
-        editingAgent ? skillApi.listSkills(editingAgent.id) : Promise.resolve([]),
+        scope.multiUser
+          ? governance.catalog()
+          : skillApi.listSkillPoolSkills().then((items) => ({ items })),
+        editingAgent
+          ? skillApi.listSkills(editingAgent.id)
+          : Promise.resolve([]),
       ])
         .then(([catalog, workspaceSkills]) => {
           if (!active || !scope.current()) return;
@@ -211,7 +226,11 @@ function AgentModalBody({
   };
 
   const toggleSkill = (name: string) => {
-    if (!scope.current() || (scope.multiUser || editingAgent ? !scope.canEdit : !scope.ready)) return;
+    if (
+      !scope.current() ||
+      (scope.multiUser || editingAgent ? !scope.canEdit : !scope.ready)
+    )
+      return;
     const isInstalled = editingAgent && installedSkills.includes(name);
     if (isInstalled) return;
 
@@ -256,7 +275,13 @@ function AgentModalBody({
           <Input />
         </Form.Item>
 
-        <AgentBackendFields form={form} open={open} />
+        {editingAgent ? (
+          <AgentBackendFields form={form} open={open} />
+        ) : (
+          <Form.Item name="backend" hidden initialValue="qwenpaw">
+            <Input />
+          </Form.Item>
+        )}
 
         {editingAgent && (
           <Form.Item name="id" label={t("agent.id")}>

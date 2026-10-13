@@ -168,20 +168,20 @@ describe("useChannels", () => {
   it("个人绑定模式只读取当前用户绑定，不读取智能体频道配置", async () => {
     (api.listChannelTypes as ReturnType<typeof vi.fn>).mockResolvedValue([
       "console",
-      "telegram",
+      "feishu",
     ]);
-    (
-      api.listUserChannelBindings as ReturnType<typeof vi.fn>
-    ).mockResolvedValue([
-      {
-        id: "binding-1",
-        channel_type: "telegram",
-        display_name: "我的 Telegram",
-        enabled: true,
-        config: { bot_prefix: "mine" },
-        configured_secret_fields: ["bot_token"],
-      },
-    ]);
+    (api.listUserChannelBindings as ReturnType<typeof vi.fn>).mockResolvedValue(
+      [
+        {
+          id: "binding-1",
+          channel_type: "feishu",
+          display_name: "我的飞书",
+          enabled: true,
+          config: { bot_prefix: "mine" },
+          configured_secret_fields: ["bot_token"],
+        },
+      ],
+    );
 
     const { result } = renderHook(() => useChannels("user"));
 
@@ -189,50 +189,44 @@ describe("useChannels", () => {
 
     expect(api.listChannels).not.toHaveBeenCalled();
     expect(api.listUserChannelBindings).toHaveBeenCalledWith("agent-1");
-    expect(result.current.channels.telegram).toEqual({
+    expect(result.current.channels.feishu).toEqual({
       enabled: true,
       bot_prefix: "mine",
-      display_name: "我的 Telegram",
+      display_name: "我的飞书",
       isBuiltin: true,
       bindingId: "binding-1",
       configuredSecretFields: ["bot_token"],
     });
-    expect(result.current.channels.console).toEqual({
-      enabled: false,
-      bot_prefix: "",
-      display_name: "",
-      isBuiltin: true,
-      configuredSecretFields: [],
-    });
+    expect(result.current.channels.console).toBeUndefined();
   });
 
   it("切换到个人绑定后忽略较晚返回的旧视图请求", async () => {
     let resolveAgentChannels: (
       value: Record<string, Record<string, unknown>>,
     ) => void = () => {};
-    const agentChannels = new Promise<
-      Record<string, Record<string, unknown>>
-    >((resolve) => {
-      resolveAgentChannels = resolve;
-    });
+    const agentChannels = new Promise<Record<string, Record<string, unknown>>>(
+      (resolve) => {
+        resolveAgentChannels = resolve;
+      },
+    );
     (api.listChannelTypes as ReturnType<typeof vi.fn>).mockResolvedValue([
-      "telegram",
+      "feishu",
     ]);
     (api.listChannels as ReturnType<typeof vi.fn>).mockReturnValue(
       agentChannels,
     );
-    (
-      api.listUserChannelBindings as ReturnType<typeof vi.fn>
-    ).mockResolvedValue([
-      {
-        id: "binding-new",
-        channel_type: "telegram",
-        display_name: "我的 Telegram",
-        enabled: false,
-        config: { bot_prefix: "mine" },
-        configured_secret_fields: ["bot_token"],
-      },
-    ]);
+    (api.listUserChannelBindings as ReturnType<typeof vi.fn>).mockResolvedValue(
+      [
+        {
+          id: "binding-new",
+          channel_type: "feishu",
+          display_name: "我的飞书",
+          enabled: false,
+          config: { bot_prefix: "mine" },
+          configured_secret_fields: ["bot_token"],
+        },
+      ],
+    );
 
     const { result, rerender } = renderHook(
       ({ mode }: { mode: "agent" | "user" }) => useChannels(mode),
@@ -241,12 +235,51 @@ describe("useChannels", () => {
 
     rerender({ mode: "user" as const });
     await waitFor(() => {
-      expect(result.current.channels.telegram?.bot_prefix).toBe("mine");
+      expect(result.current.channels.feishu?.bot_prefix).toBe("mine");
     });
 
-    resolveAgentChannels({ telegram: { bot_prefix: "stale-agent" } });
+    resolveAgentChannels({ feishu: { bot_prefix: "stale-agent" } });
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(result.current.channels.telegram?.bot_prefix).toBe("mine");
+    expect(result.current.channels.feishu?.bot_prefix).toBe("mine");
+  });
+
+  it("个人频道只展示钉钉、飞书、微信、企业微信和 QQ", async () => {
+    vi.mocked(api.listChannelTypes).mockResolvedValue([
+      "telegram",
+      "qq",
+      "wechat",
+      "console",
+      "dingtalk",
+      "custom",
+      "wecom",
+      "feishu",
+    ]);
+    vi.mocked(api.listUserChannelBindings).mockResolvedValue([
+      {
+        id: "hidden-binding",
+        channel_type: "telegram",
+        display_name: "旧频道",
+        enabled: true,
+        config: {},
+        configured_secret_fields: [],
+      },
+    ]);
+    const { result } = renderHook(() => useChannels("user"));
+
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    expect(result.current.orderedKeys).toEqual([
+      "dingtalk",
+      "feishu",
+      "wechat",
+      "wecom",
+      "qq",
+    ]);
+    expect(Object.keys(result.current.channels)).toEqual(
+      result.current.orderedKeys,
+    );
+    expect(result.current.channels.telegram).toBeUndefined();
+    expect(api.listChannels).not.toHaveBeenCalled();
   });
 });

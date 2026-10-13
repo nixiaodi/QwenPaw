@@ -119,6 +119,7 @@ export const chatApi = {
     channel?: string;
     archived?: boolean;
     scope?: "all" | "owned" | "shared";
+    requestContext?: AgentRequestContext;
   }) => {
     const searchParams = new URLSearchParams();
     if (params?.user_id) searchParams.append("user_id", params.user_id);
@@ -127,7 +128,13 @@ export const chatApi = {
       searchParams.append("archived", String(params.archived));
     if (params?.scope) searchParams.append("scope", params.scope);
     const query = searchParams.toString();
-    return request<ChatSpec[]>(`/chats${query ? `?${query}` : ""}`);
+    const options = withAgentRequestContext(
+      undefined,
+      params?.requestContext,
+    );
+    return options
+      ? request<ChatSpec[]>(`/chats${query ? `?${query}` : ""}`, options)
+      : request<ChatSpec[]>(`/chats${query ? `?${query}` : ""}`);
   },
 
   createChat: (chat: Partial<ChatSpec>) =>

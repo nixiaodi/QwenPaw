@@ -17,6 +17,8 @@
 import React, { useMemo } from "react";
 import RequestActions from "@agentscope-ai/chat/lib/AgentScopeRuntimeWebUI/core/AgentScopeRuntime/Request/Actions";
 import { TranscriptText } from "./TranscriptText";
+import { normalizeSandboxArtifactLinks } from "./sandboxArtifactLink";
+import { artifactDisplayName, deliveredArtifactsFromMessages, type DeliveredArtifact } from "./deliveredArtifacts";
 import { ToolResponseStatusContext } from "../../components/Chat/ToolCards/shared/ToolResponseContext";
 import AgentScopeRuntimeResponseBuilder from "@agentscope-ai/chat/lib/AgentScopeRuntimeWebUI/core/AgentScopeRuntime/Response/Builder";
 import ResponseActions from "@agentscope-ai/chat/lib/AgentScopeRuntimeWebUI/core/AgentScopeRuntime/Response/Actions";
@@ -59,7 +61,7 @@ function sortByOrder<T extends { item: { order?: number } }>(arr: T[]): T[] {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyCardProps = any;
 
-function HostMessage({ data }: { data: IAgentScopeRuntimeMessage }) {
+function HostMessage({ data, delivered = [] }: { data: IAgentScopeRuntimeMessage; delivered?: DeliveredArtifact[] }) {
   const replaceMediaURL = useChatAnywhereOptions(
     (options) => options.api?.replaceMediaURL,
   );
@@ -80,7 +82,7 @@ function HostMessage({ data }: { data: IAgentScopeRuntimeMessage }) {
               <Markdown
                 key={index}
                 components={renderableCodeComponents}
-                content={item.text}
+                content={normalizeSandboxArtifactLinks(item.text || "", delivered)}
                 cursor={item.status === AgentScopeRuntimeRunStatus.InProgress}
               />
             );
@@ -111,7 +113,7 @@ function HostMessage({ data }: { data: IAgentScopeRuntimeMessage }) {
                 key={index}
                 data={[
                   {
-                    name: item.file_name || item.fileName || item.file_id,
+                    name: artifactDisplayName(item.file_name || item.fileName || item.file_id || item.file_url?.split("/").pop() || "artifact"),
                     size: item.file_size,
                     url: formatMediaURL(item.file_url),
                   },
@@ -153,6 +155,7 @@ function DefaultHostResponseCard({
     () => AgentScopeRuntimeResponseBuilder.mergeToolMessages(data.output),
     [data.output],
   );
+  const delivered = useMemo(() => deliveredArtifactsFromMessages(data.output), [data.output]);
 
   if (
     !messages.length &&
@@ -174,7 +177,7 @@ function DefaultHostResponseCard({
         const itemKey = `${item.type}:${item.id}:${index}`;
         switch (item.type) {
           case AgentScopeRuntimeMessageType.MESSAGE:
-            return <HostMessage key={itemKey} data={item} />;
+            return <HostMessage key={itemKey} data={item} delivered={delivered} />;
           case AgentScopeRuntimeMessageType.PLUGIN_CALL:
           case AgentScopeRuntimeMessageType.PLUGIN_CALL_OUTPUT:
           case AgentScopeRuntimeMessageType.TOOL_CALL:

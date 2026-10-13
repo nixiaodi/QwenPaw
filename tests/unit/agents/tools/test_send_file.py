@@ -41,6 +41,48 @@ async def test_send_root_generated_file_publishes_it_to_outputs(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "name,content",
+    [
+        ("report.pdf", b"not a PDF"),
+        ("poster.png", b"not an image"),
+        ("report.docx", b"not a Word file"),
+        ("slides.pptx", b"not a presentation"),
+        ("sheet.xlsx", b"not a workbook"),
+        ("empty.txt", b""),
+    ],
+)
+async def test_invalid_artifact_is_not_published_as_success(tmp_path, name, content):
+    from agentscope.message import ToolResultState
+
+    source = tmp_path / name
+    source.write_bytes(content)
+    set_current_project_dir(tmp_path)
+    set_current_workspace_dir(tmp_path)
+    result = await send_file_to_user(str(source))
+    assert result.state == ToolResultState.ERROR
+    assert source.exists()
+    assert not (tmp_path / "artifacts" / name).exists()
+
+
+@pytest.mark.asyncio
+async def test_valid_generated_pdf_is_published(tmp_path):
+    from pypdf import PdfWriter
+    from agentscope.message import ToolResultState
+
+    source = tmp_path / "report.pdf"
+    writer = PdfWriter()
+    writer.add_blank_page(width=100, height=100)
+    with source.open("wb") as stream:
+        writer.write(stream)
+    set_current_project_dir(tmp_path)
+    set_current_workspace_dir(tmp_path)
+    result = await send_file_to_user(str(source))
+    assert result.state == ToolResultState.SUCCESS
+    assert (tmp_path / "artifacts" / "report.pdf").is_file()
+
+
+@pytest.mark.asyncio
 async def test_send_existing_output_keeps_the_same_file(tmp_path: Path):
     published = tmp_path / "artifacts" / "报告.md"
     published.parent.mkdir()
@@ -76,8 +118,11 @@ async def test_send_shared_agent_output_stays_in_the_users_project(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_multi_user_missing_identity_never_sends_shared_file(tmp_path, monkeypatch):
+async def test_multi_user_missing_identity_never_sends_shared_file(
+    tmp_path, monkeypatch
+):
     from agentscope.message import ToolResultState
+
     monkeypatch.setattr("qwenpaw.identity.runtime.is_multi_user_enabled", lambda: True)
     source = tmp_path / "report.md"
     source.write_text("private", encoding="utf-8")
@@ -93,15 +138,65 @@ async def test_multi_user_missing_identity_never_sends_shared_file(tmp_path, mon
 async def test_private_registration_denied_never_falls_back(tmp_path, monkeypatch):
     from agentscope.message import ToolResultState
     from qwenpaw.artifacts.service import ArtifactService, ArtifactSourceDenied
+
     monkeypatch.setattr("qwenpaw.identity.runtime.is_multi_user_enabled", lambda: True)
+
     async def deny(*args, **kwargs):
         raise ArtifactSourceDenied("artifact_source_denied")
+
     monkeypatch.setattr(ArtifactService, "publish", deny)
     source = tmp_path / "report.md"
     source.write_bytes(b"report")
     set_current_project_dir(tmp_path)
-    set_current_request_context({"user_id": "11111111-1111-4111-8111-111111111111", "agent_id": "agent-a", "conversation_id": "22222222-2222-4222-8222-222222222222"})
+    set_current_request_context(
+        {
+            "user_id": "11111111-1111-4111-8111-111111111111",
+            "agent_id": "agent-a",
+            "conversation_id": "22222222-2222-4222-8222-222222222222",
+        }
+    )
     result = await send_file_to_user(str(source))
     assert result.state == ToolResultState.ERROR
     assert "retry" in result.content[0].text
     assert source.exists() and not (tmp_path / "artifacts").exists()
+
+
+@pytest.mark.asyncio
+async def test_private_file_returns_portable_authenticated_artifact_url(
+    tmp_path, monkeypatch
+):
+    from types import SimpleNamespace
+    from uuid import UUID
+    from qwenpaw.artifacts.service import ArtifactService
+
+    source = tmp_path / "report.pdf"
+    from pypdf import PdfWriter
+
+    writer = PdfWriter()
+    writer.add_blank_page(width=100, height=100)
+    with source.open("wb") as stream:
+        writer.write(stream)
+    artifact_id = UUID("11111111-1111-4111-8111-111111111111")
+
+    async def publish(*args, **kwargs):
+        return SimpleNamespace(id=artifact_id)
+
+    async def download(*args, **kwargs):
+        return SimpleNamespace(id=artifact_id), source
+
+    monkeypatch.setattr(ArtifactService, "publish", publish)
+    monkeypatch.setattr(ArtifactService, "download_path", download)
+    monkeypatch.setattr("qwenpaw.identity.runtime.is_multi_user_enabled", lambda: True)
+    set_current_project_dir(tmp_path)
+    set_current_request_context(
+        {
+            "user_id": str(artifact_id),
+            "agent_id": "default",
+            "conversation_id": str(artifact_id),
+        }
+    )
+    result = await send_file_to_user(str(source))
+    expected = f"/api/console/artifacts/{artifact_id}/download"
+    assert str(result.content[0].source.url).startswith("file:")
+    assert expected in result.content[1].text
+    assert "sandbox:" not in result.content[1].text

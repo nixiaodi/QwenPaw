@@ -5,9 +5,13 @@ from uuid import UUID
 from fastapi import HTTPException
 
 from ..access.agent_repository import agent_database_id
+from ..personal_library.content_extractor import SEARCHABLE_EXTENSIONS, extract_searchable_text
+from ..utils.io_utils import run_sync_io
 
 PROFILE_FILES = frozenset({"AGENTS.md", "SOUL.md", "PROFILE.md", "MEMORY.md", "HEARTBEAT.md", "BOOTSTRAP.md"})
-TEXT_SUFFIXES = frozenset({".md", ".txt", ".json", ".yaml", ".yml", ".csv"})
+TEXT_SUFFIXES = frozenset("." + extension for extension in SEARCHABLE_EXTENSIONS)
+IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg"})
+REFERENCE_SUFFIXES = TEXT_SUFFIXES | IMAGE_SUFFIXES
 SOURCES = ("temporary", "personal_library", "agent_profile", "artifact")
 
 
@@ -45,7 +49,7 @@ class ChatFileReferences:
             records = await self.attachments.list_owned_attachments(owner_user_id=self.owner,
                 agent_id=agent_database_id(self.agent_key), lifecycle="temporary")
             for record in records:
-                if self._temporary_allowed(record) and Path(record.original_name).suffix.lower() in TEXT_SUFFIXES:
+                if self._temporary_allowed(record) and Path(record.original_name).suffix.lower() in REFERENCE_SUFFIXES:
                     path = Path(record.storage_key)
                     if path.is_file() and not path.is_symlink():
                         items.append(self._entry("temporary", record.id, record.original_name, record.original_name))
@@ -60,7 +64,7 @@ class ChatFileReferences:
                 continue
         if self.artifacts is not None:
             for artifact in await self.artifacts.list_active(owner_user_id=self.owner, agent_key=self.agent_key):
-                if Path(artifact.original_name).suffix.lower() in TEXT_SUFFIXES:
+                if Path(artifact.original_name).suffix.lower() in REFERENCE_SUFFIXES:
                     try:
                         await self.artifacts.download_path(owner_user_id=self.owner, agent_key=self.agent_key, artifact_id=artifact.id)
                         items.append(self._entry("artifact", artifact.id, artifact.original_name, artifact.relative_path))
@@ -99,12 +103,14 @@ class ChatFileReferences:
                     record, path = await self.artifacts.download_path(owner_user_id=self.owner,
                         agent_key=self.agent_key, artifact_id=UUID(identifier))
                     name = record.original_name
-                if Path(name).suffix.lower() not in TEXT_SUFFIXES or path.is_symlink():
+                if Path(name).suffix.lower() not in REFERENCE_SUFFIXES or path.is_symlink():
                     raise ValueError("unsupported_reference")
-                with path.open("rb") as stream:
-                    data = stream.read(65_537)
+                if Path(name).suffix.lower() in IMAGE_SUFFIXES:
+                    content = f"Image file: {name}\nUse view_image to inspect the authorized local file: {path}"
+                else:
+                    content = await run_sync_io(extract_searchable_text, path)
                 result.append({**self._entry(source, identifier, name, name),
-                    "content": data[:65_536].decode("utf-8", errors="replace"), "truncated": len(data) > 65_536})
+                    "content": content[:65_536], "truncated": len(content) > 65_536})
             except (ValueError, OSError, PermissionError) as exc:
                 raise HTTPException(404, "file_reference_unavailable") from exc
         return result

@@ -27,6 +27,8 @@ const BUILTIN_ORDER = [
   "onebot",
 ];
 
+const PERSONAL_CHANNEL_ORDER = ["dingtalk", "feishu", "wechat", "wecom", "qq"];
+
 function bindingConfigs(
   types: string[],
   bindings: UserChannelBinding[],
@@ -69,7 +71,13 @@ export function useChannels(mode: ChannelViewMode = "agent") {
     const requestId = ++requestIdRef.current;
     setLoading(true);
     try {
-      const types = await api.listChannelTypes();
+      const availableTypes = (await api.listChannelTypes()) ?? [];
+      const types =
+        mode === "user"
+          ? PERSONAL_CHANNEL_ORDER.filter((type) =>
+              availableTypes.includes(type),
+            )
+          : availableTypes;
       const data =
         mode === "user"
           ? bindingConfigs(
@@ -105,11 +113,14 @@ export function useChannels(mode: ChannelViewMode = "agent") {
   const builtinOrder = useMemo(() => BUILTIN_ORDER, []);
 
   const orderedKeys = useMemo(
-    () => [
-      ...builtinOrder.filter((k) => channelTypes.includes(k)),
-      ...channelTypes.filter((k) => !builtinOrder.includes(k)),
-    ],
-    [builtinOrder, channelTypes],
+    () =>
+      mode === "user"
+        ? channelTypes
+        : [
+            ...builtinOrder.filter((k) => channelTypes.includes(k)),
+            ...channelTypes.filter((k) => !builtinOrder.includes(k)),
+          ],
+    [builtinOrder, channelTypes, mode],
   );
 
   // Read isBuiltin from API response

@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import json
 import asyncio
+import pytest
 
 from qwenpaw.agents.skill_runtime import (
     SkillIntentRouter,
@@ -218,6 +219,18 @@ def test_load_skill_rejects_disabled_skill(tmp_path):
     assert "not enabled" in text
 
 
+def test_load_skill_remains_structured_through_actual_function_tool(tmp_path):
+    from agentscope.tool import FunctionTool
+
+    _write_skill(tmp_path, "custom", "Custom workflow.")
+    set_current_workspace_dir(tmp_path)
+    set_current_channel_name("console")
+    chunk = asyncio.run(FunctionTool(load_skill)(skill="custom"))
+    payload = json.loads(chunk.content[0].text)
+    assert payload["skill"] == "custom"
+    assert payload["prompt"]
+
+
 def test_load_skill_includes_skill_relative_runtime_context(tmp_path):
     _write_skill(tmp_path, "imagegen", "Generate or edit raster images.")
     set_current_workspace_dir(tmp_path)
@@ -227,8 +240,59 @@ def test_load_skill_includes_skill_relative_runtime_context(tmp_path):
     payload = json.loads(response.content[0].text)
 
     assert payload["skill_dir"].endswith("imagegen")
-    assert "Relative paths in SKILL.md are resolved from skill_dir" in payload[
-        "runtime_note"
-    ]
+    assert (
+        "Relative paths in SKILL.md are resolved from skill_dir"
+        in payload["runtime_note"]
+    )
     assert "This skill is installed at" in payload["prompt"]
     assert "relative to that skill directory" in payload["prompt"]
+
+
+@pytest.mark.parametrize(
+    "name,description,query",
+    [
+        ("contract-review-pro", "专业合同审核，生成HTML报告", "审核这份合同"),
+        ("news-summary", "新闻搜索、新闻摘要、新闻汇总", "搜索最新新闻"),
+        ("creator-buddy", "创作者内容搜索总控", "分析小红书爆款笔记"),
+        ("tender-search", "招中标数据查询分析助手", "查询最近的招标公告"),
+        ("tender-bid-writer", "编写招标投标技术文件", "帮我编写投标文件"),
+    ],
+)
+def test_chinese_business_request_routes_to_its_enabled_skill(
+    tmp_path, name, description, query
+):
+    _write_skill(tmp_path, name, description)
+    route = _router(tmp_path).route(query)
+    assert route is not None
+    assert route.kind == "invoke"
+    assert route.skill.name == name
+
+
+@pytest.mark.parametrize(
+    "name,description",
+    [
+        ("contract-review-pro", "专业合同审核，生成HTML报告"),
+        ("codex-ppt", "Generate PPT/PPTX decks from reports"),
+        ("tender-bid-writer", "编写投标Word文档"),
+    ],
+)
+def test_generic_pdf_report_does_not_invoke_specialist_skill(
+    tmp_path, name, description
+):
+    _write_skill(tmp_path, name, description)
+    assert _router(tmp_path).route("生成一份PDF报告并发送给我") is None
+
+
+def test_platform_image_request_prefers_image_skill_over_content_orchestrator(tmp_path):
+    _write_skill(tmp_path, "creator-buddy", "创作者内容搜索总控")
+    _write_skill(tmp_path, "imagegen", "Generate images.")
+    route = _router(tmp_path).route("帮我生成一张小红书宣传海报")
+    assert route.kind == "invoke"
+    assert route.skill.name == "imagegen"
+
+
+def test_creator_can_route_other_platform_searches(tmp_path):
+    _write_skill(tmp_path, "creator-buddy", "创作者全域内容搜索总控")
+    route = _router(tmp_path).route("搜索抖音的成都旅游视频")
+    assert route is not None
+    assert route.skill.name == "creator-buddy"

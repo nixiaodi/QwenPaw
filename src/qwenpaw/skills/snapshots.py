@@ -1,6 +1,7 @@
 """Immutable, verified skill-only snapshots stored below a controlled root."""
 
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -37,6 +38,32 @@ def _check_path(path):
         raise ValueError("unsafe_skill_path")
 
 
+def _is_public_skill_metadata(path):
+    """Recognize package metadata, never a workspace/pool runtime manifest."""
+    if not path.is_file():
+        return False
+    try:
+        metadata = json.loads(path.read_text(encoding="utf-8"))
+    except (UnicodeError, ValueError):
+        return False
+    if not isinstance(metadata, dict):
+        return False
+    text_fields = {"name", "description", "author", "version", "icon"}
+    list_fields = {"categories", "tags"}
+    if not metadata.keys() <= text_fields | list_fields:
+        return False
+    if not all(isinstance(metadata.get(key), str) for key in ("name", "description")):
+        return False
+    if not _NAME.fullmatch(metadata["name"]):
+        return False
+    return all(
+        isinstance(value, str)
+        if key in text_fields
+        else isinstance(value, list) and all(isinstance(item, str) for item in value)
+        for key, value in metadata.items()
+    )
+
+
 def directory_hash(root, *, shared=True):
     """Hash every path and byte; shared publication additionally rejects private files."""
     root = Path(root)
@@ -55,7 +82,15 @@ def directory_hash(root, *, shared=True):
                 or lowered.startswith(".env.")
                 or lowered.endswith((".pem", ".key"))
             ):
-                raise ValueError("private_skill_file")
+                # Some skill packages ship descriptive skill.json metadata.
+                # Only this root-level schema is public; all bytes still pass
+                # the mandatory credential scan when captured or verified.
+                if not (
+                    lowered == "skill.json"
+                    and path.parent == root
+                    and _is_public_skill_metadata(path)
+                ):
+                    raise ValueError("private_skill_file")
             relative = path.relative_to(root).as_posix().encode("utf-8")
             digest.update(len(relative).to_bytes(8, "big") + relative)
             if path.is_dir():

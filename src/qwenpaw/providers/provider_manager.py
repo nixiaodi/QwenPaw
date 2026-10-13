@@ -1580,6 +1580,10 @@ class ProviderManager:  # pylint: disable=too-many-public-methods
         try:
             models = await provider.fetch_models()
             if save:
+                existing = {model.id: model for model in provider.models + provider.extra_models}
+                for model in models:
+                    if model.id in existing:
+                        model.enabled = existing[model.id].enabled
                 provider.extra_models = models
                 # Save provider config to appropriate location
                 is_plugin = provider_id in self.plugin_providers
@@ -1675,6 +1679,8 @@ class ProviderManager:  # pylint: disable=too-many-public-methods
                 model_name=f"{provider_id}/{model_id}",
                 details={"provider_id": provider_id, "model_id": model_id},
             )
+        if not provider.enabled or not provider.get_model_info(model_id).enabled:
+            raise ProviderError(message="Provider or model is disabled.")
         self.active_model = ModelSlotConfig(
             provider_id=provider_id,
             model=model_id,
@@ -2253,6 +2259,7 @@ class ProviderManager:  # pylint: disable=too-many-public-methods
         config: dict,
     ) -> None:
         """Restore persisted overrides onto a built-in model definition."""
+        model.enabled = config.get("enabled", True)
         if config["generate_kwargs"]:
             model.generate_kwargs = config["generate_kwargs"]
         if config["max_tokens"] is not None:
@@ -2293,6 +2300,7 @@ class ProviderManager:  # pylint: disable=too-many-public-methods
                 if not builtin.freeze_url:
                     builtin.base_url = provider.base_url
                 builtin.api_key = provider.api_key
+                builtin.enabled = provider.enabled
                 if provider.auth_mode != "api_key":
                     builtin.auth_mode = provider.auth_mode
                 if provider.custom_headers:
@@ -2316,6 +2324,7 @@ class ProviderManager:  # pylint: disable=too-many-public-methods
                 # part of the built-in list).
                 stored_model_config: dict = {}
                 _per_model_keys = (
+                    "enabled",
                     "generate_kwargs",
                     "max_tokens",
                     "max_input_length",
@@ -2502,6 +2511,7 @@ class ProviderManager:  # pylint: disable=too-many-public-methods
                 )
 
                 # Merge saved config (api_key, base_url, extra_models, etc)
+                provider_info.enabled = saved_config.get("enabled", True)
                 if "api_key" in saved_config:
                     provider_info.api_key = saved_config["api_key"]
                 if "base_url" in saved_config:

@@ -12,6 +12,7 @@ function getBackendSessionId(): string {
 export function useRuntimeStatus(active: boolean) {
   const [status, setStatus] = useState<RuntimeStatus | null>(null);
   const prevBackendSidRef = useRef("");
+  const updateVersionRef = useRef(0);
 
   const fetchStatus = useCallback(async () => {
     const sid = getBackendSessionId();
@@ -19,10 +20,21 @@ export function useRuntimeStatus(active: boolean) {
       prevBackendSidRef.current = sid;
       setStatus(null);
     }
-    if (!sid) return;
+    if (!sid) {
+      setStatus(null);
+      return;
+    }
+    const version = ++updateVersionRef.current;
     try {
       const data = await runtimeStatusApi.getCurrent(sid);
-      setStatus(data);
+      if (
+        getBackendSessionId() === sid &&
+        version === updateVersionRef.current
+      ) {
+        setStatus(
+          data?.status === "completed" || data?.status === "idle" ? null : data,
+        );
+      }
     } catch {
       // ignore transient polling errors
     }
@@ -30,6 +42,7 @@ export function useRuntimeStatus(active: boolean) {
 
   useEffect(() => {
     if (!active) {
+      updateVersionRef.current += 1;
       setStatus(null);
       return;
     }
@@ -42,14 +55,12 @@ export function useRuntimeStatus(active: boolean) {
       (updated, eventSessionId, eventRootSessionId) => {
         const mySid = getBackendSessionId();
         if (
-          mySid &&
-          eventSessionId &&
-          eventRootSessionId &&
-          eventSessionId !== mySid &&
-          eventRootSessionId !== mySid
+          !mySid ||
+          (eventSessionId !== mySid && eventRootSessionId !== mySid)
         ) {
           return;
         }
+        updateVersionRef.current += 1;
         setStatus(updated);
       },
     );

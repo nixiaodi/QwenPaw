@@ -539,6 +539,9 @@ class BaseChannel(ABC):
         session_id = getattr(request, "session_id", "") or ""
         user_id = getattr(request, "user_id", "") or ""
         channel_id = getattr(request, "channel", self.channel)
+        platform_owner = getattr(self, "_platform_owner_user_id", None)
+        if platform_owner is not None:
+            user_id = str(platform_owner)
 
         chat = await self._workspace.chat_manager.get_or_create_chat(
             session_id,
@@ -564,10 +567,27 @@ class BaseChannel(ABC):
                 exc_info=True,
             )
 
+        stream_source = self._stream_with_tracker
+        tracker_payload = payload
+        persistence = getattr(self._workspace.chat_manager, "persisting_stream_source", None)
+        if platform_owner is not None and callable(persistence):
+            async def channel_stream(native_payload):
+                request.request_context = native_payload["meta"]["request_context"]
+                async for line in self._stream_with_tracker(request):
+                    yield line
+            tracker_payload = {
+                "meta": {"request_context": dict(getattr(request, "request_context", None) or {})},
+                "content_parts": [part.model_dump(mode="json") if hasattr(part, "model_dump") else part
+                    for message in getattr(request, "input", []) or []
+                    for part in getattr(message, "content", []) or []],
+            }
+            if not tracker_payload["content_parts"] and isinstance(payload, dict):
+                tracker_payload["content_parts"] = payload.get("content_parts", [])
+            stream_source = persistence(chat, channel_stream)
         queue, is_new = await self._workspace.task_tracker.attach_or_start(
             chat.id,
-            payload,
-            self._stream_with_tracker,
+            tracker_payload,
+            stream_source,
             owner=self._workspace,
         )
 

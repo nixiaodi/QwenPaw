@@ -1,0 +1,9 @@
+# Dependencies used by the migrated contract, document and creator skills.
+pandas>=2.2,<3
+PyPDF2>=3,<4
+defusedxml>=0.7,<1
+youtube-transcript-api>=1,<2
+reportlab>=4,<5
+python-docx>=1,<2
+python-pptx>=1,<2
+openpyxl>=3.1,<4

@@ -83,6 +83,7 @@ function ModelConfigEditor({
   const [maxTokens, setMaxTokens] = useState<number | null>(
     model.max_tokens ?? 8192,
   );
+  const [enabled, setEnabled] = useState(model.enabled !== false);
   const [maxInputLength, setMaxInputLength] = useState<number | null>(
     model.max_input_length ?? 131072,
   );
@@ -113,6 +114,7 @@ function ModelConfigEditor({
 
   useEffect(() => {
     setText(initialText);
+    setEnabled(model.enabled !== false);
     setMaxTokens(model.max_tokens ?? 8192);
     setMaxInputLength(model.max_input_length ?? 131072);
     setMaxInputLengthDirty(false);
@@ -123,6 +125,7 @@ function ModelConfigEditor({
     setDirty(false);
   }, [
     initialText,
+    model.enabled,
     model.max_tokens,
     model.max_input_length,
     model.relay_reasoning,
@@ -170,6 +173,7 @@ function ModelConfigEditor({
     setSaving(true);
     try {
       const updated = await api.configureModel(providerId, model.id, {
+        enabled,
         max_tokens: effectiveMaxTokens,
         ...(maxInputLengthDirty
           ? { max_input_length: effectiveMaxInputLength }
@@ -205,6 +209,23 @@ function ModelConfigEditor({
 
   return (
     <div style={{ padding: "8px 0 4px" }}>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 12,
+          marginBottom: 12,
+        }}
+      >
+        <span style={labelStyle}>{t("common.enabled")}</span>
+        <Switch
+          checked={enabled}
+          onChange={(value) => {
+            setEnabled(value);
+            setDirty(true);
+          }}
+        />
+      </div>
       <div style={{ display: "flex", gap: 16, marginBottom: 12 }}>
         <div style={{ flex: 1 }}>
           <div style={labelStyle}>

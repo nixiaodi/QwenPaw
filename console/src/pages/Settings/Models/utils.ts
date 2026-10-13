@@ -14,7 +14,9 @@ export function getIsConfigured(provider: ProviderInfo): boolean {
 }
 
 export function countConfiguredProviders(providers: ProviderInfo[]): number {
-  return providers.filter(getIsConfigured).length;
+  return providers.filter(
+    (provider) => provider.enabled !== false && getIsConfigured(provider),
+  ).length;
 }
 
 export interface ProviderGroup {

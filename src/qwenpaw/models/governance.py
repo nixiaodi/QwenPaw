@@ -24,6 +24,8 @@ class ModelGovernanceService:
     async def _runtime_catalog(self, manager):
         result = []
         for provider in await manager.list_provider_info():
+            if not getattr(provider, "enabled", True):
+                continue
             if provider.require_api_key and not provider.api_key:
                 continue
             if not provider.require_api_key and not provider.base_url:
@@ -36,6 +38,8 @@ class ModelGovernanceService:
                 NAMESPACE_URL, "qwenpaw:model-provider:" + provider.id
             )
             for model in safe_info.models + safe_info.extra_models:
+                if not getattr(model, "enabled", True):
+                    continue
                 if not runtime.has_model(model.id):
                     continue
                 result.append(

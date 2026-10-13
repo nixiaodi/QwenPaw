@@ -561,6 +561,7 @@ class ReMeLightMemoryManager(BaseMemoryManager):
             source_conversation_id = str(
                 kwargs.pop("_source_conversation_id", "") or "",
             )
+            manual_memory = bool(kwargs.pop("_manual_memory", False))
             scope_user_id = getattr(self, "_scope_actor_user_id", None)
             access_checker = getattr(self, "_scope_access_checker", None)
             if scope_user_id is not None and access_checker:
@@ -591,6 +592,7 @@ class ReMeLightMemoryManager(BaseMemoryManager):
                 else {}
             )
             inbox_kwargs = dict(kwargs)
+            inbox_kwargs["_manual_memory"] = manual_memory
             inbox_kwargs["_memory_files"] = self._changed_memory_file_locators(
                 before_files,
                 after_files,
@@ -604,6 +606,9 @@ class ReMeLightMemoryManager(BaseMemoryManager):
                 inbox_kwargs["_source_conversation_id"] = (
                     source_conversation_id
                 )
+            metadata = getattr(response, "metadata", None)
+            if isinstance(metadata, dict):
+                metadata["memory_files"] = inbox_kwargs["_memory_files"]
             await self._append_reme_job_result_to_inbox(
                 name,
                 response=response,
@@ -662,7 +667,8 @@ class ReMeLightMemoryManager(BaseMemoryManager):
             return False
 
         memory_config = await run_sync_io(self.get_memory_config)
-        if not getattr(memory_config, INBOX_NOTIFICATION_FIELDS[name]):
+        manual_memory = bool(kwargs.get("_manual_memory"))
+        if not manual_memory and not getattr(memory_config, INBOX_NOTIFICATION_FIELDS[name]):
             logger.info(
                 "ReMe job result inbox push disabled: agent_id=%s job_name=%s",
                 self.agent_id,
@@ -676,8 +682,10 @@ class ReMeLightMemoryManager(BaseMemoryManager):
             return False
         if (
             name == "auto_memory"
+            and not manual_memory
             and isinstance(response_metadata, dict)
             and response_metadata.get("modified") is False
+            and not kwargs.get("_memory_files")
         ):
             logger.info(
                 "ReMe job result inbox push skipped; no memory change: "
@@ -713,8 +721,10 @@ class ReMeLightMemoryManager(BaseMemoryManager):
         memory_files = self._sanitize_memory_file_locators(
             kwargs.get("_memory_files"),
         )
-        if memory_files:
+        if name in INBOX_MEMORY_FILE_JOB_NAMES:
             payload["memory_files"] = memory_files
+            if success and not memory_files:
+                body = "本次没有写入或更新记忆文件。内容可能已记录，或没有需要长期保存的新信息。"
         if name == "daily_paper":
             payload["force"] = bool(kwargs.get("force", False))
             payload["topics"] = str(kwargs.get("topics") or "")
@@ -1469,12 +1479,23 @@ class ReMeLightMemoryManager(BaseMemoryManager):
         response = await self._run_reme_job(
             "auto_memory",
             needs_llm=True,
+            raise_on_error=bool(kwargs.get("_manual_memory")),
+            _manual_memory=kwargs.get("_manual_memory", False),
             _model_authority=kwargs.get("_model_authority"),
             _source_conversation_id=kwargs.get("_source_conversation_id"),
             **job_kwargs,
         )
         if response is None:
+            if kwargs.get("_manual_memory"):
+                raise RuntimeError("Memory runtime is unavailable; no memory file was written")
             return ""
+        if kwargs.get("_manual_memory"):
+            if not response.success:
+                error = RuntimeError(str(response.answer or "Memory extraction failed"))
+                error._memory_notification_sent = bool((getattr(response, "metadata", None) or {}).get(INBOX_EMITTED_METADATA_KEY))
+                raise error
+            files = (getattr(response, "metadata", None) or {}).get("memory_files", [])
+            return "已更新记忆文件：" + ", ".join(file["path"] for file in files) if files else "本次没有写入或更新记忆文件。内容可能已记录，或没有需要长期保存的新信息。"
         return str(response.answer or "")
 
     async def auto_memory_search(
@@ -1596,6 +1617,8 @@ class ReMeLightMemoryManager(BaseMemoryManager):
             )
             return
 
+        if kwargs.get("_manual_memory"):
+            return await self.summarize(messages=all_messages, **kwargs)
         self.add_summarize_task(
             messages=all_messages,
             session_id=session_id,
@@ -1619,7 +1642,7 @@ class ReMeLightMemoryManager(BaseMemoryManager):
             user_id=user_id,
             agent_id=self.agent_id,
         )
-        await runtime.auto_memory(messages, **kwargs)
+        return await runtime.auto_memory(messages, **kwargs)
 
     async def scoped_dream(self, *, actor_user_id: str | None, **kwargs: Any) -> None:
         """在当前用户的私有 ReMe 运行时执行手动 dream。"""
@@ -1649,11 +1672,35 @@ class ReMeLightMemoryManager(BaseMemoryManager):
 
     async def public_dream(self) -> None:
         """定时任务入口：始终使用 Agent 公共记忆。"""
-        await self.dream(memory_scope="public")
+        await self.dream(memory_scope="public", **await self._public_model_job_kwargs())
 
     async def public_daily_paper(self) -> None:
         """定时任务入口：始终使用 Agent 公共记忆。"""
-        await self.daily_paper(memory_scope="public")
+        await self.daily_paper(memory_scope="public", **await self._public_model_job_kwargs())
+
+    async def _public_model_job_kwargs(self) -> dict[str, Any]:
+        """从 Agent 当前归属解析定时任务授权，不继承任何会话身份。"""
+        from ...identity.runtime import is_multi_user_enabled, get_identity_schema
+        if not is_multi_user_enabled():
+            return {}
+        from ...access.agent_repository import PostgresAgentRepository
+        from ...identity.repository import PostgresUserRepository
+        from ...access.actor import ActorContext, ActorType
+        from ...models.runtime import get_model_service, resolve_selection
+        from ...providers import ProviderManager
+        from ...models.governance import ModelAccessError
+        from uuid import uuid4
+
+        governance = await PostgresAgentRepository(schema=get_identity_schema()).get_governance(self.agent_id)
+        if governance is None or governance.status != "active":
+            raise ModelAccessError("memory_job_owner_unavailable")
+        owner = await PostgresUserRepository(schema=get_identity_schema()).get_user(governance.owner_user_id)
+        if owner is None or owner.status != "active":
+            raise ModelAccessError("memory_job_owner_unavailable")
+        actor = ActorContext(user_id=owner.id,actor_type=ActorType.USER,platform_role=owner.platform_role,admin_mode=False,request_id=str(uuid4()))
+        manager = ProviderManager.get_instance()
+        resolved = await resolve_selection(get_model_service(manager),actor,self.agent_id,await load_agent_config_async(self.agent_id),manager,None)
+        return {"_model_authority": (actor,self.agent_id,resolved["active_llm"]), "recipient_user_id":str(owner.id)}
 
     @staticmethod
     def _trusted_user_id(value: str | None) -> UUID:

@@ -277,9 +277,17 @@ export const SkillCard = React.memo(function SkillCard({
         <p className={styles.descriptionText}>{skill.description || "-"}</p>
       </div>
 
-      {/* Footer - only show on hover or batch mode, always on mobile */}
-      {!readOnly && (isHover || batchMode || isMobile) && (
-        <div className={styles.cardFooter}>
+      {sourceActions && (
+        <div className={styles.cardSourceActions}>{sourceActions}</div>
+      )}
+
+      {/* Reserve footer space; reveal actions on hover, in batch mode or on mobile. */}
+      {!readOnly && (
+        <div
+          className={`${styles.cardFooter} ${
+            isHover || batchMode || isMobile ? "" : styles.cardFooterHidden
+          }`}
+        >
           <Button
             type="default"
             className={styles.actionButton}
@@ -301,7 +309,6 @@ export const SkillCard = React.memo(function SkillCard({
           )}
         </div>
       )}
-      {sourceActions}
     </Card>
   );
 });

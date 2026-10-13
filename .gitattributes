@@ -1,2 +1,5 @@
 *.bat text eol=crlf
 *.sh text eol=lf
+
+# Preserve exact bytes for immutable skill snapshot hashes.
+deploy/skill-packages/imagegen/** -text whitespace=cr-at-eol

@@ -98,8 +98,9 @@ async def test_bound_process_records_external_identity_before_agent_run() -> Non
     ]
 
 
-def test_personal_binding_records_last_target_for_binding_owner(monkeypatch) -> None:
+def test_personal_binding_records_last_target_for_binding_owner(monkeypatch, tmp_path) -> None:
     runtime = import_module("qwenpaw.app.channels.user_bindings")
+    monkeypatch.setattr("qwenpaw.constant.WORKING_DIR", tmp_path)
     owner_user_id = uuid4()
     binding_id = uuid4()
     callbacks = []
@@ -252,3 +253,158 @@ async def test_reconcile_cleans_up_manager_when_start_fails() -> None:
     assert failed_manager.started == 1
     assert failed_manager.stopped == 1
     assert binding_id not in registry._managers
+
+
+def test_personal_binding_uses_user_and_binding_scoped_state_paths(
+    monkeypatch, tmp_path,
+) -> None:
+    """同一智能体下两个用户的媒体、凭据和监听器缓存不能共用目录。"""
+    runtime = import_module("qwenpaw.app.channels.user_bindings")
+    from qwenpaw.app.channels.manager import ChannelManager
+
+    monkeypatch.setattr("qwenpaw.constant.WORKING_DIR", tmp_path)
+    captured = []
+
+    class Manager:
+        channels = []
+
+        def set_workspace(self, workspace):
+            pass
+
+    def from_config(**kwargs):
+        captured.append(kwargs)
+        return Manager()
+
+    monkeypatch.setattr(ChannelManager, "from_config", from_config)
+    workspace = SimpleNamespace(
+        agent_id="shared-agent", workspace_dir=tmp_path / "workspaces/shared-agent",
+        stream_query=lambda request: request, _config=SimpleNamespace(language="zh"),
+    )
+    owners = [uuid4(), uuid4()]
+    bindings = [uuid4(), uuid4()]
+    for owner, binding in zip(owners, bindings):
+        runtime._build_channel_manager(
+            workspace=workspace,
+            binding_repository=SimpleNamespace(upsert_external_identity=AsyncMock()),
+            channel_type="wechat",
+            config={"enabled": True, "media_dir": str(workspace.workspace_dir / "media"),
+                    "bot_token_file": str(workspace.workspace_dir / "token.json")},
+            owner_user_id=owner, binding_id=binding,
+        )
+
+    for kwargs, owner, binding in zip(captured, owners, bindings):
+        expected = tmp_path / "user_workspaces" / str(owner) / "shared-agent" / "channels" / str(binding)
+        assert kwargs["workspace_dir"] == expected
+        assert kwargs["config"].channels.wechat.media_dir == str(expected / "media")
+        assert kwargs["config"].channels.wechat.bot_token_file == str(expected / "wechat_bot_token.json")
+        assert expected.is_dir()
+    assert captured[0]["workspace_dir"] != captured[1]["workspace_dir"]
+
+
+@pytest.mark.parametrize("channel_type", ["dingtalk", "feishu", "wechat", "wecom", "qq"])
+def test_each_personal_connector_instantiates_only_its_scoped_listener(
+    monkeypatch, tmp_path, channel_type,
+) -> None:
+    """五种个人连接器实际构造时不夹带其他默认频道，也不共用状态目录。"""
+    runtime = import_module("qwenpaw.app.channels.user_bindings")
+    monkeypatch.setattr("qwenpaw.constant.WORKING_DIR", tmp_path)
+    workspace = SimpleNamespace(
+        agent_id="shared-agent", workspace_dir=tmp_path / "workspaces/shared-agent",
+        stream_query=lambda request: request, _config=SimpleNamespace(language="zh"),
+    )
+    managers = []
+    for _ in range(2):
+        owner, binding = uuid4(), uuid4()
+        manager = runtime._build_channel_manager(
+            workspace=workspace,
+            binding_repository=SimpleNamespace(upsert_external_identity=AsyncMock()),
+            channel_type=channel_type, config={"enabled": True},
+            owner_user_id=owner, binding_id=binding,
+        )
+        assert [channel.channel for channel in manager.channels] == [channel_type]
+        channel = manager.channels[0]
+        expected = tmp_path / "user_workspaces" / str(owner) / "shared-agent" / "channels" / str(binding)
+        assert channel._workspace_dir == expected
+        assert channel._media_dir == expected / "media"
+        assert channel._platform_owner_user_id == owner
+        if channel_type == "wechat":
+            assert channel._context_tokens_file.parent == expected
+            assert channel._bot_token_file.parent == expected
+        if channel_type == "feishu":
+            assert channel._receive_id_store_path().parent == expected
+        if channel_type == "dingtalk":
+            assert channel._session_webhook_store_path().parent == expected
+        managers.append(manager)
+    assert managers[0].channels[0]._workspace_dir != managers[1].channels[0]._workspace_dir
+
+
+@pytest.mark.asyncio
+async def test_same_agent_binding_removal_does_not_stop_another_user() -> None:
+    """同一智能体同一频道的两份个人绑定独立启停。"""
+    runtime = import_module("qwenpaw.app.channels.user_bindings")
+    records = [
+        SimpleNamespace(id=uuid4(), agent_key="shared-agent", owner_user_id=uuid4(),
+                        channel_type="feishu", enabled=True)
+        for _ in range(2)
+    ]
+    managers = []
+
+    def factory(**kwargs):
+        manager = FakeManager()
+        managers.append(manager)
+        return manager
+
+    registry = runtime.UserChannelBindingRuntimeRegistry(
+        workspace_manager=SimpleNamespace(get_agent=AsyncMock(return_value=SimpleNamespace(agent_id="shared-agent"))),
+        binding_repository=SimpleNamespace(get_runtime_config=AsyncMock(return_value={"enabled": True})),
+        manager_factory=factory,
+    )
+    for record in records:
+        await registry.reconcile(record)
+    await registry.remove(records[0].id)
+
+    assert managers[0].stopped == 1
+    assert managers[1].started == 1
+    assert managers[1].stopped == 0
+    assert registry._managers == {records[1].id: managers[1]}
+
+
+@pytest.mark.parametrize("foreign", [False, True])
+def test_personal_connector_media_uses_existing_authenticated_preview_scope(
+    monkeypatch, tmp_path, foreign,
+) -> None:
+    """新监听器媒体路径沿用个人工作区预览规则，本人可见、其他用户不可见。"""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from qwenpaw.app.routers import files
+
+    runtime = import_module("qwenpaw.app.channels.user_bindings")
+    monkeypatch.setattr("qwenpaw.constant.WORKING_DIR", tmp_path)
+    owner = uuid4()
+    manager = runtime._build_channel_manager(
+        workspace=SimpleNamespace(
+            agent_id="shared-agent", workspace_dir=tmp_path / "workspaces/shared-agent",
+            stream_query=lambda request: request, _config=SimpleNamespace(language="zh"),
+        ),
+        binding_repository=SimpleNamespace(upsert_external_identity=AsyncMock()),
+        channel_type="wechat", config={"enabled": True},
+        owner_user_id=owner, binding_id=uuid4(),
+    )
+    target = manager.channels[0]._media_dir / "image.png"
+    target.write_bytes(b"private-channel-image")
+    monkeypatch.setattr(files, "WORKING_DIR", tmp_path)
+    monkeypatch.setattr(files, "_ALLOWED_ROOT", tmp_path)
+    monkeypatch.setattr("qwenpaw.identity.runtime.is_multi_user_enabled", lambda: True)
+    monkeypatch.setattr(
+        "qwenpaw.access.dependencies.get_actor",
+        lambda request: SimpleNamespace(user_id=uuid4() if foreign else owner),
+    )
+    app = FastAPI()
+    app.include_router(files.router, prefix="/api")
+    response = TestClient(app).get("/api/files/preview/" + target.as_posix())
+
+    assert response.status_code == (403 if foreign else 200)
+    if not foreign:
+        assert response.content == b"private-channel-image"
+    else:
+        assert b"private-channel-image" not in response.content

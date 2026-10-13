@@ -195,3 +195,40 @@ async def test_delete_is_scoped_to_authenticated_user() -> None:
             },
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_same_agent_users_create_and_list_independent_channel_bindings() -> None:
+    """共用智能体的用户分别拥有自己的同类型频道，不能读到另一人的配置。"""
+    owners = [uuid4(), uuid4()]
+
+    class Repository:
+        records = {}
+
+        async def upsert(self, **kwargs):
+            self.records[(kwargs["agent_key"], kwargs["owner_user_id"], kwargs["channel_type"])] = kwargs
+            return kwargs
+
+        async def list_for_user(self, *, agent_key, owner_user_id):
+            return [record for (agent, owner, _), record in self.records.items()
+                    if agent == agent_key and owner == owner_user_id]
+
+    service = channel_bindings.ChannelBindingService(
+        binding_repository=Repository(),
+        agent_repository=FakeAgentRepository(AgentAccessRecord(
+            agent_key="shared-agent", owner_user_id=uuid4(),
+            role=AgentResourceRole.USER, status="active", visibility=AgentVisibility.PUBLIC,
+        )),
+    )
+    for index, owner in enumerate(owners):
+        await service.upsert(
+            actor=_actor(owner), agent_key="shared-agent", channel_type="feishu",
+            display_name=f"user-{index}", enabled=True,
+            config={"app_id": f"bot-{index}"}, secrets={"app_secret": f"fake-secret-{index}"},
+        )
+    for index, owner in enumerate(owners):
+        records = await service.list_bindings(actor=_actor(owner), agent_key="shared-agent")
+        assert len(records) == 1
+        assert records[0]["owner_user_id"] == owner
+        assert records[0]["config"] == {"app_id": f"bot-{index}"}
+        assert records[0]["secrets"] == {"app_secret": f"fake-secret-{index}"}

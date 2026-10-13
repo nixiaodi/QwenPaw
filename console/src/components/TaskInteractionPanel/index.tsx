@@ -6,10 +6,12 @@ import { usePendingUserInput } from "../UserInputPanel/usePendingUserInput";
 
 interface TaskInteractionPanelProps {
   planEnabled: boolean;
+  running: boolean;
 }
 
 const TaskInteractionPanel: React.FC<TaskInteractionPanelProps> = ({
   planEnabled,
+  running,
 }) => {
   const { request, refresh } = usePendingUserInput(true);
 
@@ -19,7 +21,7 @@ const TaskInteractionPanel: React.FC<TaskInteractionPanelProps> = ({
 
   return (
     <>
-      <RuntimeStatusPanel enabled />
+      <RuntimeStatusPanel enabled={running} />
       <ChatPlanPanel enabled={planEnabled} />
     </>
   );

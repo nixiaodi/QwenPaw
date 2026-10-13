@@ -102,6 +102,7 @@ class ScopedMemoryManagerView:
 
     async def auto_memory(self, messages: Any, **kwargs: Any) -> Any:
         kwargs["_model_authority"] = self._model_authority
+        kwargs.setdefault("_source_conversation_id", self._request_context.get("conversation_id") or self._request_context.get("chat_id"))
         if not self._scoped:
             return await self._manager.auto_memory(messages, **kwargs)
         kwargs.pop("actor_user_id", None)

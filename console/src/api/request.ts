@@ -84,6 +84,15 @@ const DEFAULT_TIMEOUT_MS = 30000;
 const DEFAULT_RETRIES = 0;
 const DEFAULT_RETRY_DELAY_MS = 1000;
 
+export class ApiRequestError extends Error {
+  readonly status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.status = status;
+    this.name = "ApiRequestError";
+  }
+}
+
 export async function request<T = unknown>(
   path: string,
   options: RequestOptions = {},
@@ -176,7 +185,7 @@ export async function request<T = unknown>(
           if (!isLoginPath(window.location.pathname)) {
             window.location.href = getLoginHref(window.location);
           }
-          throw new Error("Not authenticated");
+          throw new ApiRequestError("Not authenticated", 401);
         }
 
         const text = await response.text().catch(() => "");
@@ -188,7 +197,7 @@ export async function request<T = unknown>(
           ? `${errorMessage} - ${text}`
           : `Request failed: ${response.status} ${response.statusText}`;
 
-        throw new Error(finalMessage);
+        throw new ApiRequestError(finalMessage, response.status);
       }
 
       if (response.status === 204) {

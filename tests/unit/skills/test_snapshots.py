@@ -1,6 +1,7 @@
 """Snapshots preserve submitted bytes and reject unsafe filesystem entries."""
 
 import os
+import json
 import pytest
 
 
@@ -61,6 +62,66 @@ def test_snapshot_rejects_private_files_and_untrusted_key(tmp_path):
         store.capture(root, "sample")
     with pytest.raises(ValueError, match="invalid_snapshot_key"):
         store.verify("../source", "0" * 64)
+
+
+def test_snapshot_preserves_public_skill_metadata(tmp_path):
+    from qwenpaw.skills.snapshots import SnapshotStore
+
+    root = source(tmp_path)
+    metadata = json.dumps(
+        {
+            "name": "sample",
+            "description": "Contract review skill",
+            "author": "Example author",
+            "version": "4.0.0",
+            "categories": ["Legal"],
+            "tags": ["Review"],
+            "icon": "⚖️",
+        },
+        ensure_ascii=False,
+    )
+    (root / "skill.json").write_text(metadata, encoding="utf-8")
+    store = SnapshotStore(tmp_path / "snapshots")
+    saved = store.capture(root, "sample")
+    snapshot = store.verify(saved.snapshot_key, saved.content_hash)
+    assert (snapshot / "skill.json").read_text(encoding="utf-8") == metadata
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"sample": {"enabled": True, "config": {"token": "private"}}},
+        {"name": "sample", "description": "Example", "config": {}},
+        {"name": "sample", "description": "Example", "tags": {"token": "private"}},
+        {"name": "sample", "description": "Example", "author": {"token": "private"}},
+        {"name": "sample", "description": "Example", "tags": [123]},
+        ["sample"],
+    ],
+)
+def test_snapshot_rejects_non_metadata_skill_json(tmp_path, metadata):
+    from qwenpaw.skills.snapshots import SnapshotStore
+
+    root = source(tmp_path)
+    (root / "skill.json").write_text(json.dumps(metadata), encoding="utf-8")
+    with pytest.raises(ValueError, match="private_skill_file"):
+        SnapshotStore(tmp_path / "snapshots").capture(root, "sample")
+
+
+def test_public_skill_metadata_still_receives_credential_scan(tmp_path):
+    from qwenpaw.skills.snapshots import SnapshotStore
+
+    root = source(tmp_path)
+    (root / "skill.json").write_text(
+        json.dumps(
+            {
+                "name": "sample",
+                "description": "ghp_" + "B" * 36,
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="shared_skill_credentials_detected"):
+        SnapshotStore(tmp_path / "snapshots").capture(root, "sample")
 
 
 @pytest.mark.parametrize("mode", ["off", "whitelist", "warn"])

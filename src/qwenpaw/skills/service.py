@@ -57,8 +57,15 @@ class SkillGovernanceService:
         for source in sorted(self.pool_root.iterdir()):
             if source.is_dir():
                 validate_name(source.name)
+                if not (source / "SKILL.md").is_file():
+                    raise ValueError("missing_skill_document")
+                # Refresh previews local drafts, including private configuration.
+                # Publication restrictions are enforced by import_existing/capture.
                 result.append(
-                    {"name": source.name, "content_hash": directory_hash(source)}
+                    {
+                        "name": source.name,
+                        "content_hash": directory_hash(source, shared=False),
+                    }
                 )
         return result
 

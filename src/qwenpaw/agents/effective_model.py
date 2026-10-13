@@ -38,6 +38,12 @@ def resolve_effective_model(
         raise ProviderError(
             message=f"Provider '{slot.provider_id}' not found.",
         )
+    if not getattr(provider, "enabled", True):
+        raise ProviderError(message=f"Provider '{slot.provider_id}' is disabled.")
+    get_model_info = getattr(provider, "get_model_info", None)
+    model_info = get_model_info(slot.model) if callable(get_model_info) else None
+    if model_info is not None and not getattr(model_info, "enabled", True):
+        raise ProviderError(message=f"Model '{slot.model}' is disabled.")
     has_model = getattr(provider, "has_model", None)
     if callable(has_model) and not has_model(slot.model):
         raise ProviderError(

@@ -1,4 +1,5 @@
 export interface ModelInfo {
+  enabled?: boolean;
   id: string;
   name: string;
   supports_multimodal: boolean | null;
@@ -23,6 +24,7 @@ export interface ModelInfo {
 }
 
 export interface ProviderInfo {
+  enabled?: boolean;
   id: string;
   name: string;
   api_key_prefix: string;
@@ -81,6 +83,7 @@ export interface BaseUrlOption {
 }
 
 export interface ProviderConfigRequest {
+  enabled?: boolean;
   api_key?: string;
   clear_api_key?: boolean;
   clear_custom_headers?: boolean;
@@ -142,6 +145,7 @@ export interface AddModelRequest {
 }
 
 export interface ModelConfigRequest {
+  enabled?: boolean;
   max_tokens?: number;
   max_input_length?: number;
   generate_kwargs?: Record<string, unknown>;

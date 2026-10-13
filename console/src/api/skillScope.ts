@@ -28,7 +28,8 @@ function initialize() {
       next.phase !== previous.phase ||
       next.user?.id !== previous.user?.id ||
       next.user?.platform_role !== previous.user?.platform_role ||
-      next.accessToken !== previous.accessToken
+      ((next.mode !== "multi_user" || !next.user?.id) &&
+        next.accessToken !== previous.accessToken)
     )
       advance();
   });

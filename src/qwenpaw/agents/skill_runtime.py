@@ -12,7 +12,7 @@ from typing import Any, Literal
 
 import frontmatter
 from agentscope.message import TextBlock
-from agentscope.tool import ToolResponse
+from agentscope.tool import ToolChunk
 
 from ..config.context import (
     get_current_channel_name,
@@ -175,16 +175,34 @@ _CAPABILITY_SPECS: dict[str, dict[str, set[str]]] = {
             "presentation",
             "slides",
             "deck",
-            "report",
             "幻灯片",
             "演示",
-            "报告",
             ".pptx",
         },
     },
     "pdf": {
         "skill": {"pdf", "表单", "ocr"},
-        "query": {"pdf", ".pdf", "表单", "ocr", "report", "报告"},
+        "query": {"pdf", ".pdf", "表单", "ocr"},
+    },
+    "contract": {
+        "skill": {"contract", "合同", "合同审核"},
+        "query": {"contract", "合同", "条款审核", "协议审核"},
+    },
+    "news": {
+        "skill": {"news", "新闻"},
+        "query": {"news", "新闻", "资讯", "热点"},
+    },
+    "creator": {
+        "skill": {"creator", "创作者", "新媒体"},
+        "query": {"小红书", "公众号", "博主", "爆款", "笔记", "新媒体"},
+    },
+    "tender_search": {
+        "skill": {"tender-search", "标讯查询", "招中标数据"},
+        "query": {"招标公告", "中标公告", "标讯", "中标单位", "采购单位", "招中标", "供应商", "商机"},
+    },
+    "tender_writing": {
+        "skill": {"tender-bid-writer", "标书编写"},
+        "query": {"标书", "投标文件", "投标方案", "技术投标", "招标文件"},
     },
     "browser": {
         "skill": {
@@ -385,9 +403,14 @@ def _render_skill_runtime_prefix(meta: SkillMeta) -> str:
         "directory, not the workspace root.\n"
         "- When running a bundled script from this skill, set the command "
         "working directory to the skill directory or prefix the command with "
-        f"`cd \"{skill_dir}\" && ...`.\n"
+        f'`cd "{skill_dir}" && ...`.\n'
         "- Save user-facing outputs in the workspace unless SKILL.md says "
         "otherwise.\n"
+        "- Imported skill tool names refer to workflow roles. In this runtime, "
+        "use web_search/web_fetch for WebSearch/WebFetch and ask_user_input "
+        "for AskUserQuestion when those tools are available. Preserve approval "
+        "and missing-input gates. If a required tool is unavailable, explain "
+        "the blocker; do not invent a tool call or completed result.\n"
         "---\n\n"
     )
 
@@ -431,6 +454,8 @@ def _matched_terms(text: str, terms: set[str]) -> set[str]:
 
 def _skill_domains(skill: SkillMeta) -> tuple[set[str], set[str]]:
     name_text = f"{skill.name} {skill.display_name} {skill.skill_dir.name}".lower()
+    # Preserve full names and expose component words in hyphenated skill names.
+    name_text += " " + re.sub(r"[-_]", " ", name_text)
     desc_text = skill.description.lower()
     primary: set[str] = set()
     secondary: set[str] = set()
@@ -455,6 +480,20 @@ def _query_domains(query: str) -> set[str]:
     for domain, spec in _CAPABILITY_SPECS.items():
         if _matched_terms(query_lower, spec["query"]):
             domains.add(domain)
+    content_action = re.search(
+        r"搜索|检索|分析|博主|点赞|收藏|评论|选题|爆款|search|analy[sz]e", query_lower
+    )
+    if content_action and re.search(
+        r"抖音|b站|bilibili|微博|youtube|douyin|小红书|公众号|xiaohongshu|weixin", query_lower
+    ):
+        domains.add("creator")
+    if (
+        "image" in domains
+        and not content_action
+        and re.search(r"生成|制作|设计|绘制|画|generate|create|draw", query_lower)
+    ):
+        # A platform label specifies the image's destination, not a search task.
+        domains.discard("creator")
     return domains
 
 
@@ -480,6 +519,16 @@ def _score_semantic(query: str, skill: SkillMeta) -> tuple[int, str]:
         added = 12 * len(primary_matches)
         score += added
         reasons.append(f"primary={sorted(primary_matches)}(+{added})")
+        specialist_matches = primary_matches & {
+            "contract",
+            "news",
+            "creator",
+            "tender_search",
+            "tender_writing",
+        }
+        if specialist_matches and len(requested_domains) > 1:
+            score += 3
+            reasons.append("specialist(+3)")
     if secondary_matches and primary_matches:
         added = 3 * len(secondary_matches)
         score += added
@@ -598,9 +647,7 @@ class SkillIntentRouter:
             args = text[match.end() :].strip()
             if not args:
                 args = (
-                    text[: match.start()].strip()
-                    + " "
-                    + text[match.end() :].strip()
+                    text[: match.start()].strip() + " " + text[match.end() :].strip()
                 ).strip()
             return skill, args or text
         return None
@@ -698,9 +745,7 @@ class SkillIntentRouter:
                 reason="semantic_ambiguous",
                 candidates=candidates,
                 skills=tuple(
-                    skill
-                    for skill, score in scored[:3]
-                    if best_score - score <= 2
+                    skill for skill, score in scored[:3] if best_score - score <= 2
                 ),
                 diagnostics=tuple(diagnostics),
             )
@@ -714,7 +759,13 @@ class SkillIntentRouter:
         )
 
 
-async def load_skill(skill: str, args: str | None = None) -> ToolResponse:
+def render_skill_instructions(meta: SkillMeta) -> str:
+    """Render the same skill body for automatic and explicit loading."""
+    _, post = _read_skill_post(meta.skill_dir)
+    return _render_skill_runtime_prefix(meta) + post.content
+
+
+async def load_skill(skill: str, args: str | None = None) -> ToolChunk:
     """Load an enabled local skill definition and its instructions.
 
     Call this tool before using a local skill. It only reads skills enabled
@@ -729,7 +780,9 @@ async def load_skill(skill: str, args: str | None = None) -> ToolResponse:
     channel_name = get_current_channel_name() or "console"
     meta = resolve_enabled_skill(workspace_dir, channel_name, skill)
     if meta is None:
-        return ToolResponse(
+        return ToolChunk(
+            is_last=True,
+            state="error",
             content=[
                 TextBlock(
                     type="text",
@@ -741,7 +794,6 @@ async def load_skill(skill: str, args: str | None = None) -> ToolResponse:
             ],
         )
     raw, post = _read_skill_post(meta.skill_dir)
-    runtime_prefix = _render_skill_runtime_prefix(meta)
     payload = {
         "skill": meta.name,
         "name": str(post.get("name") or meta.display_name),
@@ -753,10 +805,11 @@ async def load_skill(skill: str, args: str | None = None) -> ToolResponse:
             "Run bundled scripts from skill_dir, not the workspace root."
         ),
         "args": args or "",
-        "prompt": runtime_prefix + post.content,
+        "prompt": render_skill_instructions(meta),
         "raw": raw,
     }
-    return ToolResponse(
+    return ToolChunk(
+        is_last=True,
         content=[
             TextBlock(
                 type="text",

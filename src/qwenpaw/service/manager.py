@@ -7,6 +7,7 @@ import json
 import os
 import socket
 import subprocess
+import sys
 import time
 from contextlib import contextmanager
 
@@ -87,6 +88,10 @@ def assert_port_available(c):
     family = socket.AF_INET6 if ":" in c.host else socket.AF_INET
     with socket.socket(family) as probe:
         try:
+            # POSIX 的已关闭连接可能仍处于 TIME_WAIT，不应阻止服务重启。
+            # Windows 的复用语义不同，保持原有独占端口检查。
+            if sys.platform != "win32":
+                probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             probe.bind((c.host, c.port))
         except OSError:
             raise ServiceError(

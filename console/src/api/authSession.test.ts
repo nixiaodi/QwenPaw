@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("./modules/auth", () => ({
   authApi: { refresh: vi.fn() },
@@ -17,9 +17,11 @@ import {
   clearAccessSession,
   ensureAccessSessionFresh,
   refreshAccessSession,
+  restoreAccessSession,
 } from "./authSession";
 
 describe("authSession", () => {
+  afterEach(() => vi.unstubAllGlobals());
   beforeEach(() => {
     vi.clearAllMocks();
     clearAccessSession();
@@ -64,5 +66,26 @@ describe("authSession", () => {
 
     await expect(ensureAccessSessionFresh()).resolves.toBe(true);
     expect(authApi.refresh).toHaveBeenCalledOnce();
+  });
+
+  it("keeps cross-tab refresh blocked until bootstrap identity verification completes", async () => {
+    let queue = Promise.resolve();
+    vi.stubGlobal("navigator", { locks: { request: (_name: string, callback: () => Promise<unknown>) => {
+      const result = queue.then(callback);
+      queue = result.then(() => undefined, () => undefined);
+      return result;
+    } } });
+    vi.mocked(authApi.refresh).mockResolvedValue({ token: "fresh", username: "admin", access_expires_at: new Date(Date.now() + 900_000).toISOString() });
+    let finishIdentity: (value: string) => void = () => undefined;
+    const identity = vi.fn(() => new Promise<string>((resolve) => { finishIdentity = resolve; }));
+    const restoring = restoreAccessSession(identity);
+    await vi.waitFor(() => expect(identity).toHaveBeenCalledOnce());
+    const refreshing = refreshAccessSession();
+    await Promise.resolve();
+    expect(authApi.refresh).toHaveBeenCalledOnce();
+    finishIdentity("verified");
+    expect((await restoring).identity).toBe("verified");
+    expect(await refreshing).toBe(true);
+    expect(authApi.refresh).toHaveBeenCalledTimes(2);
   });
 });

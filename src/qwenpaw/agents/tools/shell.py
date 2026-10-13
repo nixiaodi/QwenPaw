@@ -1174,7 +1174,7 @@ async def execute_shell_command(
             response_text = "".join(parts)
         return ToolChunk(
             is_last=True,
-            state=ToolResultState.SUCCESS,
+            state=ToolResultState.SUCCESS if result.exit_code == 0 else ToolResultState.ERROR,
             content=[
                 TextBlock(
                     type="text",
@@ -1264,7 +1264,7 @@ async def execute_shell_command(
 
         return ToolChunk(
             is_last=True,
-            state=ToolResultState.SUCCESS,
+            state=ToolResultState.SUCCESS if returncode == 0 else ToolResultState.ERROR,
             content=[
                 TextBlock(
                     type="text",
@@ -1284,7 +1284,7 @@ async def execute_shell_command(
         )
         return ToolChunk(
             is_last=True,
-            state=ToolResultState.SUCCESS,
+            state=ToolResultState.ERROR,
             content=[
                 TextBlock(
                     type="text",

@@ -12,8 +12,19 @@ interface ModelsSectionProps {
   providers: Array<{
     id: string;
     name: string;
-    models?: Array<{ id: string; name: string; is_free?: boolean }>;
-    extra_models?: Array<{ id: string; name: string; is_free?: boolean }>;
+    enabled?: boolean;
+    models?: Array<{
+      id: string;
+      name: string;
+      is_free?: boolean;
+      enabled?: boolean;
+    }>;
+    extra_models?: Array<{
+      id: string;
+      name: string;
+      is_free?: boolean;
+      enabled?: boolean;
+    }>;
     base_url?: string;
     api_key?: string;
     api_key_configured?: boolean;
@@ -51,8 +62,10 @@ export const ModelsSection = React.memo(function ModelsSection({
   const eligible = useMemo(
     () =>
       providers.filter((p) => {
-        const hasModels =
-          (p.models?.length ?? 0) + (p.extra_models?.length ?? 0) > 0;
+        if (p.enabled === false) return false;
+        const hasModels = [...(p.models ?? []), ...(p.extra_models ?? [])].some(
+          (model) => model.enabled !== false,
+        );
         if (!hasModels) return false;
         if (p.require_api_key === false) return !!p.base_url;
         if (p.is_custom) return !!p.base_url;
@@ -75,7 +88,7 @@ export const ModelsSection = React.memo(function ModelsSection({
   const modelOptions = [
     ...(chosenProvider?.models ?? []),
     ...(chosenProvider?.extra_models ?? []),
-  ];
+  ].filter((model) => model.enabled !== false);
   const hasModels = modelOptions.length > 0;
 
   const handleProviderChange = (pid: string) => {

@@ -114,6 +114,9 @@ async def send_file_to_user(
 
     try:
         source = Path(file_path)
+        from .artifact_validation import validate_artifact
+
+        await run_sync_io(validate_artifact, source)
         context = get_current_request_context() or {}
         user_id, agent_id = context.get("user_id"), context.get("agent_id")
         from ...identity.runtime import is_multi_user_enabled
@@ -140,9 +143,18 @@ async def send_file_to_user(
                 owner_user_id=UUID(str(user_id)), agent_key=agent_id, artifact_id=artifact.id,
             )
             file_path = str(archived_path)
+            download_url = f"/api/console/artifacts/{artifact.id}/download"
+            # URLSource requires an absolute URL. The console converts this
+            # private media path to an authenticated same-origin preview URL.
+            file_url = _path_to_file_url(file_path)
+            delivery_text = (
+                f"File sent successfully. Download link: {download_url}\n"
+                "Use this exact relative URL in the reply; do not invent sandbox or local filesystem links."
+            )
         else:
             file_path = str(await run_sync_io(_publish_to_outputs, source, get_current_project_dir(), get_current_workspace_dir()))
-        file_url = _path_to_file_url(file_path)
+            file_url = _path_to_file_url(file_path)
+            delivery_text = "File sent successfully."
 
         return ToolChunk(
             is_last=True,
@@ -155,7 +167,7 @@ async def send_file_to_user(
                     ),
                     name=os.path.basename(file_path),
                 ),
-                TextBlock(text="File sent successfully."),
+                TextBlock(text=delivery_text),
             ],
         )
 

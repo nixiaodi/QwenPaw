@@ -307,6 +307,8 @@ async def create_channel_service(ws: "Workspace", _):
                 platform_user_id = str(UUID(str(user_id)))
             except ValueError:
                 platform_user_id = None
+        elif platform_owner is not None:
+            platform_user_id = str(platform_owner)
         update_last_dispatch(
             channel=channel,
             user_id=user_id,
@@ -315,8 +317,23 @@ async def create_channel_service(ws: "Workspace", _):
             platform_user_id=platform_user_id,
         )
 
+    process = ws.stream_query
+    platform_owner = None
+    from ...identity.runtime import is_multi_user_enabled, get_identity_schema
+    if is_multi_user_enabled():
+        from ...access.agent_repository import PostgresAgentRepository
+        from ..channels.user_bindings import bind_process_identity
+        governance = await PostgresAgentRepository(schema=get_identity_schema()).get_governance(ws.agent_id)
+        if governance is not None:
+            platform_owner = governance.owner_user_id
+            bound = bind_process_identity(process,owner_user_id=platform_owner,binding_id=None,workspace=ws)
+            native_process = process
+            async def process(request):
+                selected = native_process if getattr(request, "channel", "") == "console" else bound
+                async for event in selected(request):
+                    yield event
     cm = ChannelManager.from_config(
-        process=ws.stream_query,
+        process=process,
         config=temp_config,
         on_last_dispatch=on_last_dispatch,
         workspace_dir=ws.workspace_dir,
@@ -331,6 +348,8 @@ async def create_channel_service(ws: "Workspace", _):
     agent_language = getattr(ws._config, "language", "zh") or "zh"
     for ch in cm.channels:
         ch._language = agent_language
+        if platform_owner is not None and ch.channel != "console":
+            ch._platform_owner_user_id = platform_owner
 
     return cm
     # pylint: enable=protected-access

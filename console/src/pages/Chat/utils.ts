@@ -126,6 +126,21 @@ export function buildModelError(): Response {
   );
 }
 
+export function buildModelLoadError(error: unknown): Response {
+  const detail =
+    error instanceof Error
+      ? error.message
+      : "Unable to load the conversation model";
+  const status =
+    typeof (error as { status?: unknown })?.status === "number"
+      ? (error as { status: number }).status
+      : 503;
+  return new Response(JSON.stringify({ detail }), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
 // ---------------------------------------------------------------------------
 // URL normalization utilities
 // ---------------------------------------------------------------------------

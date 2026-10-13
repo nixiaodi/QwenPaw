@@ -71,3 +71,17 @@ def test_inbox_memory_file_filter_rejects_unmanaged_paths() -> None:
     ) == [
         {"scope": "private", "section": "daily", "path": "ok/note.md"},
     ]
+
+
+@pytest.mark.asyncio
+async def test_manual_memory_no_change_notifies_without_claiming_file_creation():
+    from uuid import uuid4
+    manager = ReMeLightMemoryManager.__new__(ReMeLightMemoryManager)
+    manager.agent_id = "agent-a"
+    manager.get_memory_config = lambda: SimpleNamespace(auto_memory_inbox_push_enabled=False)
+    response = SimpleNamespace(success=True, answer="已生成记忆文件", metadata={"modified":False})
+    with patch("qwenpaw.agents.memory.reme_light_memory_manager.append_inbox_event",new_callable=AsyncMock,return_value={"id":"event"}) as append_event:
+        pushed = await manager._append_reme_job_result_to_inbox("auto_memory",response=response,kwargs={"_manual_memory":True,"recipient_user_id":str(uuid4()),"_memory_files":[]})
+    assert pushed
+    assert "没有写入" in append_event.await_args.kwargs["body"]
+    assert append_event.await_args.kwargs["payload"]["memory_files"] == []

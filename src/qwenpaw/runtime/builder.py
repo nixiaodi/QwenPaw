@@ -150,7 +150,18 @@ class AgentBuilder:
             if extra not in skill_dirs:
                 skill_dirs.append(extra)
 
-        return Toolkit(tools=tools, skills_or_loaders=skill_dirs)
+        return Toolkit(
+            tools=tools,
+            skills_or_loaders=skill_dirs,
+            skill_instruction_template=(
+                "Available enabled skills (metadata only):\n"
+                "{% for skill in skills %}- {{ skill.name }}: {{ skill.description }}\n{% endfor %}"
+                "Discover the skill matching the user's task from this list, "
+                "then call load_skill to read its current SKILL.md before using "
+                "its scripts or workflow. Follow the loaded instructions; "
+                "never claim execution based only on this metadata."
+            ),
+        )
 
     @staticmethod
     def _tool_name(tool: Any) -> str:
@@ -277,7 +288,8 @@ class AgentBuilder:
                 channel_name,
             )
         except Exception:
-            effective_skills = []
+            _logger.exception("Unable to resolve enabled skills for workspace %s", workspace_dir)
+            raise
 
         subagent_skills = request_context.get("subagent_skills")
         if isinstance(subagent_skills, list):
@@ -460,11 +472,30 @@ class AgentBuilder:
         # System prompt.
         sys_prompt = self.build_prompt(ctx, agent_config)
 
+        from .skill_routing import prepare_skill_request
+
+        image_generation_guard = prepare_skill_request(ctx, effective_skills)
+
         middlewares = self._build_middlewares(
             ctx,
             agent_config,
             visual_recovery_store,
         )
+        from ..agents.skill_loading import SkillLoadingMiddleware
+
+        middlewares.append(SkillLoadingMiddleware(
+            effective_skills, required=getattr(ctx, "skill_load_required", False),
+            pending_task=ctx.mode_state.get("skill_routing"),
+            skill_directories={
+                Path(directory).name: directory
+                for directory in self._resolve_skill_loader_dirs(effective_skills, workspace_dir)
+            },
+        ))
+
+        if image_generation_guard is not None:
+            from ..agents.image_generation_guard import ImageGenerationEvidenceMiddleware
+
+            middlewares.append(ImageGenerationEvidenceMiddleware(image_generation_guard))
 
         running_config = agent_config.running
 
@@ -496,6 +527,9 @@ class AgentBuilder:
         # Load session state if SessionLoadHook populated it.
         if ctx.session_state:
             agent.load_state_dict(ctx.session_state)
+
+        if image_generation_guard is not None:
+            agent._delivery_guard = image_generation_guard
 
         _logger.info(
             "builder: built agent for session=%s agent=%s"

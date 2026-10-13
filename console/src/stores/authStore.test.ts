@@ -19,6 +19,7 @@ vi.mock("../api/modules/auth", () => ({
 
 import { authApi } from "../api/modules/auth";
 import { getApiToken } from "../api/config";
+import { clearAccessSession } from "../api/authSession";
 import { useAgentStore } from "./agentStore";
 import { useAuthStore } from "./authStore";
 import { useBackgroundTasksStore } from "./backgroundTasksStore";
@@ -48,6 +49,21 @@ const loginResponse = {
 };
 
 describe("authStore multi-user lifecycle", () => {
+  it("removes authenticated menus and cached conversations on session invalidation", () => {
+    useAuthStore.setState({
+      mode: "multi_user",
+      phase: "authenticated",
+      user,
+      accessToken: "old",
+    });
+    useSessionListStore.setState({
+      sessions: [{ id: "private-chat" }] as never,
+    });
+    clearAccessSession(false);
+    expect(useAuthStore.getState().phase).toBe("anonymous");
+    expect(useAuthStore.getState().user).toBeNull();
+    expect(useSessionListStore.getState().sessions).toEqual([]);
+  });
   beforeEach(() => {
     vi.clearAllMocks();
     localStorage.clear();

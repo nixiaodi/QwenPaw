@@ -133,6 +133,7 @@ def _active_models_info(
 
 
 class ProviderConfigRequest(BaseModel):
+    enabled: Optional[bool] = Field(default=None)
     api_key: Optional[str] = Field(default=None)
     clear_api_key: bool = Field(default=False)
     clear_custom_headers: bool = Field(default=False)
@@ -222,6 +223,7 @@ class AddModelRequest(BaseModel):
 
 
 class ModelConfigRequest(BaseModel):
+    enabled: Optional[bool] = Field(default=None)
     max_tokens: Optional[int] = Field(
         default=None,
         description="Maximum output tokens per response.",
@@ -274,6 +276,8 @@ def _validate_model_slot(
                 f"Model '{model_id}' not found in provider '{provider_id}'."
             ),
         )
+    if not provider.enabled or not provider.get_model_info(model_id).enabled:
+        raise HTTPException(status_code=400, detail="Provider or model is disabled.")
 
 
 async def _load_agent_model(
@@ -317,6 +321,7 @@ async def configure_provider(
             detail=f"Provider '{provider_id}' not found",
         )
     config = {
+        "enabled": body.enabled,
         "chat_model": body.chat_model,
         "auth_mode": body.auth_mode,
     }
@@ -737,15 +742,7 @@ async def configure_model(
         provider_info = await manager.update_model_config(
             provider_id=provider_id,
             model_id=model_id,
-            config={
-                "generate_kwargs": body.generate_kwargs,
-                "max_tokens": body.max_tokens,
-                "max_input_length": body.max_input_length,
-                "relay_reasoning": body.relay_reasoning,
-                "thinking_enabled": body.thinking_enabled,
-                "thinking_budget": body.thinking_budget,
-                "reasoning_effort": body.reasoning_effort,
-            },
+            config=body.model_dump(exclude_unset=True),
         )
     except (ValueError, AppBaseException) as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

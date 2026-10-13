@@ -95,6 +95,7 @@ import { replaceRuntimeMessageSnapshot } from "./runtimeMessageSnapshot";
 import { ChatTransportLifecycle } from "./chatTransportLifecycle";
 import { ApprovalCard } from "../../components/ApprovalCard/ApprovalCard";
 import TaskInteractionPanel from "../../components/TaskInteractionPanel";
+import ConversationAttachments from "./components/ConversationAttachments";
 import { commandsApi } from "../../api/modules/commands";
 import { useApprovalContext } from "../../contexts/ApprovalContext";
 import {
@@ -226,6 +227,7 @@ import {
   copyText,
   extractCopyableText,
   buildModelError,
+  buildModelLoadError,
   normalizeContentUrls,
   extractUserMessageText,
   extractTextFromMessage,
@@ -711,9 +713,9 @@ function renderSuggestionLabel(item: CommandSuggestion) {
       }`}
     >
       <div className={styles.suggestionMain}>
-        {item.icon && (
-          <span className={styles.suggestionIcon}>{item.icon}</span>
-        )}
+        <span className={styles.suggestionIcon} aria-hidden="true">
+          {item.icon}
+        </span>
         <span className={styles.suggestionCommand}>{item.command}</span>
         {item.group && (
           <span className={styles.suggestionGroup}>{item.group}</span>
@@ -1384,12 +1386,14 @@ export default function ChatPage() {
   useEffect(() => {
     const openPreview = (event: Event) => {
       const customEvent = event as CustomEvent<{
-        target: FileTarget;
+        target?: FileTarget;
+        locator?: import("../../features/files-workspace/fileLocator").FileLocator;
         trigger?: HTMLElement | null;
       }>;
       dispatchFilesDrawer({
         type: "OPEN_PREVIEW",
         target: customEvent.detail.target,
+        locator: customEvent.detail.locator,
         trigger: customEvent.detail.trigger ?? null,
       });
     };
@@ -1400,7 +1404,12 @@ export default function ChatPage() {
 
   const handleInternalFileLink = useCallback(
     (event: React.MouseEvent<HTMLDivElement>) => {
-      if (handleArtifactDownloadLink(event)) return;
+      if (
+        handleArtifactDownloadLink(event, {
+          agentId: selectedAgent,
+          conversationId: backendChatId || undefined,
+        })
+      ) return;
       const element = event.target;
       if (!(element instanceof Element)) return;
       const anchor = element.closest<HTMLAnchorElement>("a[href]");
@@ -1415,7 +1424,7 @@ export default function ChatPage() {
         trigger: anchor,
       });
     },
-    [dispatchFilesDrawer],
+    [dispatchFilesDrawer, selectedAgent, backendChatId],
   );
 
   // Wide mode toggle: expand chat content to full available width
@@ -3546,10 +3555,9 @@ export default function ChatPage() {
             setShowModelPrompt(true);
             return buildModelError();
           }
-        } catch {
+        } catch (error) {
           pendingSenderClearRef.current = null;
-          setShowModelPrompt(true);
-          return buildModelError();
+          return buildModelLoadError(error);
         }
       }
 
@@ -3809,6 +3817,7 @@ export default function ChatPage() {
         onProgress?.({ percent: 100 });
         const previewUrl = chatApi.filePreviewUrl(res.url);
         onSuccess({ url: previewUrl });
+        window.dispatchEvent(new Event("qwenpaw:attachments-changed"));
         // Track uploaded file for queue attachment support
         pendingFileListRef.current = [
           ...pendingFileListRef.current,
@@ -4139,6 +4148,7 @@ export default function ChatPage() {
             ) : !chatReadOnly && backendCapabilities?.model_selection ? (
               <HarnessModelSelector providerId={selectedAgentBackend} />
             ) : null}
+            <ConversationAttachments agentId={selectedAgent} conversationId={backendChatId || undefined} refreshKey={chatLoading} />
             <ChatActionGroup
               onToggleWorkspace={toggleFilesWorkspace}
               workspaceOpen={filesWorkspaceOpen}
@@ -4186,7 +4196,7 @@ export default function ChatPage() {
                 )}
               />
             )}
-            <TaskInteractionPanel planEnabled={planEnabled} />
+            <TaskInteractionPanel planEnabled={planEnabled} running={Boolean(chatLoading)} />
             {isQueueOnlyTab && (
               <Alert
                 type="info"

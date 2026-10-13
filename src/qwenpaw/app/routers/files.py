@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from urllib.parse import unquote
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from starlette.responses import FileResponse
 
 from qwenpaw.constant import WORKING_DIR
@@ -64,6 +64,40 @@ def _check_path(path: Path) -> str | None:
     return None
 
 
+async def _is_owned_legacy_attachment(path: Path, user_id) -> bool:
+    """旧附件目录中的文件必须有匹配用户和 Agent 的有效归属记录。"""
+    try:
+        relative = path.relative_to(WORKING_DIR.resolve() / "workspaces")
+    except ValueError:
+        return False
+    if len(relative.parts) < 3 or relative.parts[1] not in {"media", "documents", "资料"}:
+        return False
+    from qwenpaw.access.agent_repository import agent_database_id
+    from qwenpaw.app.chats.repo import PostgresConversationRepository
+    from qwenpaw.identity.runtime import get_identity_schema
+    from qwenpaw.artifacts.service import reject_symlink_path
+
+    agent_id = agent_database_id(relative.parts[0])
+    repository = PostgresConversationRepository(
+        schema=get_identity_schema(),
+    ).with_user(user_id)
+    attachments = await repository.list_owned_attachments(
+        owner_user_id=user_id, agent_id=agent_id,
+    )
+    for record in attachments:
+        if (record.owner_user_id != user_id or record.agent_id != agent_id
+                or record.lifecycle == "deleted"):
+            continue
+        source = Path(record.storage_key)
+        try:
+            reject_symlink_path(source)
+        except ValueError:
+            continue
+        if source.resolve() == path:
+            return True
+    return False
+
+
 @router.api_route(
     "/preview/{filepath:path}",
     methods=["GET", "HEAD"],
@@ -71,6 +105,7 @@ def _check_path(path: Path) -> str | None:
 )
 async def preview_file(
     filepath: str,
+    request: Request,
 ):
     """Preview file."""
     normalized = unquote(filepath)
@@ -87,7 +122,29 @@ async def preview_file(
     path = Path(normalized).expanduser()
     if not path.is_absolute():
         path = Path("/" + normalized)
+    unresolved_path = path.absolute()
     path = path.resolve()
+    from qwenpaw.identity.runtime import is_multi_user_enabled
+
+    if is_multi_user_enabled():
+        from qwenpaw.access.dependencies import get_actor
+        from qwenpaw.artifacts.service import reject_symlink_path
+
+        actor = get_actor(request)
+        if actor.user_id is None:
+            raise HTTPException(status_code=401, detail="not_authenticated")
+        user_root = WORKING_DIR.resolve() / "user_workspaces" / str(actor.user_id)
+        try:
+            reject_symlink_path(unresolved_path)
+            reject_symlink_path(user_root)
+            if not path.is_relative_to(user_root) and not await _is_owned_legacy_attachment(
+                path, actor.user_id,
+            ):
+                raise ValueError()
+        except ValueError:
+            raise HTTPException(
+                status_code=403, detail="OUTSIDE_USER_WORKSPACE"
+            ) from None
     reason = _check_path(path)
     if reason:
         raise HTTPException(status_code=403, detail=reason)

@@ -80,6 +80,8 @@ async def test_projects_rich_and_legacy_messages_in_database_order() -> None:
     assert repository.bound_user == user_id
     assert [message.content[0].text for message in messages] == ["旧消息", "推理事件"]
     assert messages[1].type.value == "reasoning"
+    assert messages[0].id == str(records[0].id)
+    assert messages[0].metadata["qwenpaw_editable"] is True
 
 
 @pytest.mark.asyncio

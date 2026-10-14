@@ -9,7 +9,7 @@ from collections.abc import Callable
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any, AsyncContextManager
-from uuid import UUID
+from uuid import UUID, uuid5
 
 from sqlalchemy import text
 
@@ -578,6 +578,231 @@ class PostgresConversationRepository(ConversationRepository):
             rows = result.mappings().all()
         return [self._row(row, MessageRecord) for row in rows]
 
+    async def list_active_messages(self, conversation_id: UUID) -> list[MessageRecord]:
+        """Return the current timeline while retaining superseded audit facts."""
+        return [
+            message
+            for message in await self.list_messages(conversation_id)
+            if message.status != "superseded"
+        ]
+
+    async def revise_latest_turn(
+        self,
+        *,
+        conversation_id: UUID,
+        agent_id: UUID,
+        target_message_id: UUID,
+        run: RunRecord,
+        message: MessageRecord,
+        revision: dict[str, Any],
+    ) -> MessageRecord:
+        """Atomically supersede the latest user turn and admit one replacement.
+
+        The run ID is the idempotency key. A conversation row lock serializes
+        revisions across tabs/processes, without blocking existing run cleanup.
+        """
+        if self.request_user_id is None:
+            raise PermissionError("conversation_owner_required")
+        if (
+            run.conversation_id != conversation_id
+            or run.initiated_by != self.request_user_id
+            or message.conversation_id != conversation_id
+            or message.run_id != run.id
+            or message.created_by != self.request_user_id
+            or message.role != "user"
+        ):
+            raise PermissionError("invalid_revision_owner")
+        async with self._session() as session:
+            owner = (
+                await session.execute(
+                    text(
+                        f"SELECT id FROM {self._table('conversations')} WHERE id=:id "
+                        "AND agent_id=:agent AND owner_user_id=:owner AND status<>'deleted' FOR NO KEY UPDATE"
+                    ),
+                    {
+                        "id": conversation_id,
+                        "agent": agent_id,
+                        "owner": self.request_user_id,
+                    },
+                )
+            ).first()
+            if owner is None:
+                raise PermissionError("Chat not found")
+            existing = (
+                (
+                    await session.execute(
+                        text(
+                            f"SELECT payload FROM {self._table('run_events')} WHERE run_id=:run AND sequence=0 "
+                            "AND event_type='turn_revision'"
+                        ),
+                        {"run": run.id},
+                    )
+                )
+                .mappings()
+                .first()
+            )
+            if existing is not None:
+                if existing["payload"] != revision:
+                    raise RepositoryConflictError("edit_request_conflict")
+                row = (
+                    (
+                        await session.execute(
+                            text(
+                                f"SELECT * FROM {self._table('messages')} WHERE run_id=:run AND role='user' ORDER BY sequence LIMIT 1"
+                            ),
+                            {"run": run.id},
+                        )
+                    )
+                    .mappings()
+                    .one()
+                )
+                return self._row(row, MessageRecord)
+            latest = (
+                (
+                    await session.execute(
+                        text(
+                            f"SELECT id,sequence FROM {self._table('messages')} WHERE conversation_id=:id "
+                            "AND role='user' AND status<>'superseded' ORDER BY sequence DESC LIMIT 1"
+                        ),
+                        {"id": conversation_id},
+                    )
+                )
+                .mappings()
+                .first()
+            )
+            if latest is None or latest["id"] != target_message_id:
+                raise RepositoryConflictError("latest_message_changed")
+            sequence = (
+                await session.execute(
+                    text(
+                        f"SELECT COALESCE(MAX(sequence),0)+1 FROM {self._table('messages')} WHERE conversation_id=:id"
+                    ),
+                    {"id": conversation_id},
+                )
+            ).scalar_one()
+            replacement = message.model_copy(update={"sequence": sequence})
+            await session.execute(
+                text(
+                    f"UPDATE {self._table('runs')} SET status='cancelled',finished_at=:now "
+                    "WHERE conversation_id=:id AND status IN ('queued','running','waiting_input','waiting_approval') "
+                    f"AND id IN (SELECT run_id FROM {self._table('messages')} WHERE conversation_id=:id "
+                    "AND sequence>=:boundary AND status<>'superseded')"
+                ),
+                {
+                    "id": conversation_id,
+                    "boundary": latest["sequence"],
+                    "now": run.started_at,
+                },
+            )
+            await session.execute(
+                text(
+                    f"UPDATE {self._table('messages')} SET status='superseded' "
+                    "WHERE conversation_id=:id AND sequence>=:boundary AND status<>'superseded'"
+                ),
+                {"id": conversation_id, "boundary": latest["sequence"]},
+            )
+            await self._insert_admitted_turn(
+                session, run, replacement, revision=revision
+            )
+            await session.execute(
+                text(
+                    f"UPDATE {self._table('attachments')} SET message_id=:replacement "
+                    "WHERE conversation_id=:conversation AND message_id=:target AND owner_user_id=:owner AND agent_id=:agent"
+                ),
+                {
+                    "replacement": replacement.id,
+                    "conversation": conversation_id,
+                    "target": target_message_id,
+                    "owner": self.request_user_id,
+                    "agent": agent_id,
+                },
+            )
+            await session.execute(
+                text(
+                    f"UPDATE {self._table('conversations')} SET updated_at=:updated WHERE id=:id"
+                ),
+                {"updated": run.started_at, "id": conversation_id},
+            )
+            return replacement
+
+    async def _insert_admitted_turn(self, session, run, message, *, revision=None):
+        await session.execute(
+            text(
+                f"INSERT INTO {self._table('runs')} (id,conversation_id,initiated_by,status,started_at,finished_at,error_summary) "
+                "VALUES (:id,:conversation_id,:initiated_by,:status,:started_at,:finished_at,:error_summary)"
+            ),
+            run.model_dump(),
+        )
+        values = message.model_dump()
+        values["content"] = self._json(message.content)
+        await session.execute(
+            text(
+                f"INSERT INTO {self._table('messages')} "
+                "(id,conversation_id,run_id,sequence,role,message_type,content,status,created_by,created_at) "
+                "VALUES (:id,:conversation_id,:run_id,:sequence,:role,:message_type,CAST(:content AS json),:status,:created_by,:created_at)"
+            ),
+            values,
+        )
+        events = [(1, "user_message", message.content)]
+        if revision is not None:
+            events.insert(0, (0, "turn_revision", revision))
+        for sequence, event_type, payload in events:
+            await session.execute(
+                text(
+                    f"INSERT INTO {self._table('run_events')} (id,run_id,sequence,event_type,payload,created_at) "
+                    "VALUES (:id,:run,:sequence,:type,CAST(:payload AS json),:created)"
+                ),
+                {
+                    "id": uuid5(run.id, event_type),
+                    "run": run.id,
+                    "sequence": sequence,
+                    "type": event_type,
+                    "payload": self._json(payload),
+                    "created": run.started_at,
+                },
+            )
+
+    async def admit_user_turn(
+        self, *, agent_id: UUID, run: RunRecord, message: MessageRecord
+    ) -> MessageRecord:
+        """Persist accepted input before a background producer is scheduled."""
+        if (
+            self.request_user_id is None
+            or run.initiated_by != self.request_user_id
+            or message.created_by != self.request_user_id
+            or message.role != "user"
+            or message.conversation_id != run.conversation_id
+            or message.run_id != run.id
+        ):
+            raise PermissionError("invalid_turn_owner")
+        async with self._session() as session:
+            owner = (
+                await session.execute(
+                    text(
+                        f"SELECT id FROM {self._table('conversations')} WHERE id=:id AND agent_id=:agent "
+                        "AND owner_user_id=:owner AND status<>'deleted' FOR NO KEY UPDATE"
+                    ),
+                    {
+                        "id": run.conversation_id,
+                        "agent": agent_id,
+                        "owner": self.request_user_id,
+                    },
+                )
+            ).first()
+            if owner is None:
+                raise PermissionError("Chat not found")
+            sequence = (
+                await session.execute(
+                    text(
+                        f"SELECT COALESCE(MAX(sequence),0)+1 FROM {self._table('messages')} WHERE conversation_id=:id"
+                    ),
+                    {"id": run.conversation_id},
+                )
+            ).scalar_one()
+            admitted = message.model_copy(update={"sequence": sequence})
+            await self._insert_admitted_turn(session, run, admitted)
+            return admitted
+
     async def create_run(self, record: RunRecord) -> RunRecord:
         async with self._session() as session:
             await session.execute(
@@ -589,6 +814,15 @@ class PostgresConversationRepository(ConversationRepository):
                 record.model_dump(),
             )
         return record
+
+    async def start_prepared_run(self, run_id: UUID) -> None:
+        async with self._session() as session:
+            await session.execute(
+                text(
+                    f"UPDATE {self._table('runs')} SET status='running' WHERE id=:id AND status='queued'"
+                ),
+                {"id": run_id},
+            )
 
     async def get_run(self, run_id: UUID) -> RunRecord | None:
         scope, scope_params = self._run_read_scope()

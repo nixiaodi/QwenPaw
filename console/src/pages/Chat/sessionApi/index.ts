@@ -262,6 +262,7 @@ function buildUserCard(msg: Message): IAgentScopeRuntimeWebUIMessage {
           created_at: parseTimestamp(msg),
           input: [
             {
+              id: msg.id,
               role: "user",
               type: "message",
               content: contentParts,

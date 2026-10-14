@@ -50,7 +50,7 @@ class PluginGovernanceRepository(Protocol):
         source_ref: str,
         content_hash: str,
         actor_id: UUID,
-        audience: AppAudience,
+        audience: AppAudience | None,
     ) -> PluginInstallation: ...
 
     async def list_installations(self) -> list[PluginInstallation]: ...
@@ -166,18 +166,22 @@ class PluginGovernanceService:
         source_type: str,
         source_ref: str,
         content_hash: str,
-        audience: AppAudience,
+        audience: AppAudience | None = None,
     ) -> PluginInstallation:
         self.require_manage(actor)
         if actor.user_id is None:
             raise PluginAccessError("plugin_actor_missing")
-        normalized = AppAudience(
-            mode=audience.mode,
-            selected_user_ids=(
-                ()
-                if audience.mode == "all_members"
-                else tuple(sorted(set(audience.selected_user_ids), key=str))
-            ),
+        normalized = (
+            AppAudience(
+                mode=audience.mode,
+                selected_user_ids=(
+                    ()
+                    if audience.mode == "all_members"
+                    else tuple(sorted(set(audience.selected_user_ids), key=str))
+                ),
+            )
+            if audience is not None
+            else None
         )
         return await self.repository.register_installation(
             candidate,
@@ -397,9 +401,20 @@ class PostgresPluginGovernanceRepository:
         source_ref: str,
         content_hash: str,
         actor_id: UUID,
-        audience: AppAudience,
+        audience: AppAudience | None,
     ) -> PluginInstallation:
         async with self.session_factory() as session:
+            parameters = {
+                "id": candidate.id,
+                "plugin_id": candidate.plugin_id,
+                "version": candidate.version,
+                "plugin_type": candidate.plugin_type,
+                "source_type": source_type,
+                "source_ref": source_ref,
+                "content_hash": content_hash,
+                "status": candidate.status,
+                "actor": actor_id,
+            }
             row = (
                 (
                     await session.execute(
@@ -409,31 +424,55 @@ class PostgresPluginGovernanceRepository:
                             "content_hash,status,installed_by) VALUES "
                             "(:id,:plugin_id,:version,:plugin_type,:source_type,"
                             ":source_ref,:content_hash,:status,:actor) "
-                            "ON CONFLICT (plugin_id) DO UPDATE SET "
-                            "version=EXCLUDED.version,plugin_type=EXCLUDED.plugin_type,"
-                            "source_type=EXCLUDED.source_type,source_ref=EXCLUDED.source_ref,"
-                            "content_hash=EXCLUDED.content_hash,status=EXCLUDED.status,"
-                            "installed_by=EXCLUDED.installed_by,installed_at=now(),"
-                            "disabled_at=NULL RETURNING id,plugin_id,version,plugin_type,status"
+                            "ON CONFLICT (plugin_id) DO NOTHING "
+                            "RETURNING id,plugin_id,version,plugin_type,status"
                         ),
-                        {
-                            "id": candidate.id,
-                            "plugin_id": candidate.plugin_id,
-                            "version": candidate.version,
-                            "plugin_type": candidate.plugin_type,
-                            "source_type": source_type,
-                            "source_ref": source_ref,
-                            "content_hash": content_hash,
-                            "status": candidate.status,
-                            "actor": actor_id,
-                        },
+                        parameters,
+                    )
+                )
+                .mappings()
+                .first()
+            )
+            created = row is not None
+            if not created:
+                row = (
+                    (
+                        await session.execute(
+                            text(
+                                f"UPDATE {self.table('plugin_installations')} SET "
+                                "version=:version,plugin_type=:plugin_type,source_type=:source_type,"
+                                "source_ref=:source_ref,content_hash=:content_hash,status=:status,"
+                                "installed_by=:actor,installed_at=now(),disabled_at=NULL "
+                                "WHERE plugin_id=:plugin_id RETURNING id,plugin_id,version,plugin_type,status"
+                            ),
+                            parameters,
+                        )
+                    )
+                    .mappings()
+                    .one()
+                )
+            # 默认首次安装仅授权安装者；未指定范围的重装保留当前授权。
+            # 在同一个事务、同一行锁下处理，避免重装覆盖并发授权变更。
+            if audience is None and created:
+                audience = AppAudience(
+                    mode="selected_users", selected_user_ids=(actor_id,)
+                )
+            if audience is not None:
+                await self._replace_audience_in_session(
+                    session, row["id"], audience, actor_id
+                )
+            row = (
+                (
+                    await session.execute(
+                        text(
+                            f"SELECT {self._projection_sql()} "
+                            f"FROM {self.table('plugin_installations')} p WHERE p.id=:id"
+                        ),
+                        {"id": row["id"]},
                     )
                 )
                 .mappings()
                 .one()
-            )
-            await self._replace_audience_in_session(
-                session, row["id"], audience, actor_id
             )
         return self._installation(row)
 

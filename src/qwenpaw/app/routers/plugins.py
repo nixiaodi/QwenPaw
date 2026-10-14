@@ -81,7 +81,7 @@ async def _persist_plugin_installation(
     *,
     source_type: str,
     source_ref: str,
-    audience: AppAudience,
+    audience: Optional[AppAudience],
 ) -> None:
     if not is_multi_user_enabled():
         return
@@ -834,7 +834,7 @@ async def _persist_or_compensate_plugin_installation(
     *,
     source_type: str,
     source_ref: str,
-    audience: AppAudience,
+    audience: Optional[AppAudience],
 ) -> None:
     """治理写入失败时撤销刚装载的代码，避免产生未登记运行态。"""
     try:
@@ -1009,9 +1009,13 @@ async def install_plugin(
         record,
         source_type="url" if is_url else "path",
         source_ref=source,
-        audience=AppAudience(
-            mode=body.audience_mode,
-            selected_user_ids=tuple(body.selected_user_ids),
+        audience=(
+            AppAudience(
+                mode=body.audience_mode,
+                selected_user_ids=tuple(body.selected_user_ids),
+            )
+            if body.model_fields_set & {"audience_mode", "selected_user_ids"}
+            else None
         ),
     )
 
@@ -1093,7 +1097,7 @@ async def upload_plugin(
         record,
         source_type="upload",
         source_ref=file.filename,
-        audience=AppAudience(mode="selected_users"),
+        audience=None,
     )
 
     return {

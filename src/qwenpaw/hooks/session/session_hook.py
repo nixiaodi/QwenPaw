@@ -100,11 +100,16 @@ class SessionSaveHook(LifecycleHook):
             proxy = StateProxy()
             proxy.data = ctx.agent.state_dict()
             proxy.data["mode_state"] = ctx.mode_state
+            request_context = getattr(request, "request_context", None) or {}
+            save_options = {}
+            if isinstance(request_context, dict) and request_context.get("run_id"):
+                save_options["run_id"] = request_context["run_id"]
             await session.save_session_state(
                 session_id=ctx.session_id,
                 user_id=user_id,
                 channel=channel,
                 agent=proxy,
+                **save_options,
             )
             ctx.extras[SESSION_SAVE_SUCCEEDED_KEY] = True
         except Exception:

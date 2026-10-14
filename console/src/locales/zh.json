@@ -3208,6 +3208,14 @@
     "system": "跟随系统"
   },
   "chat": {
+    "editMessage": "编辑消息",
+    "editResend": "重新发送",
+    "editFailed": "修改未成功，已保留编辑内容，请重试。",
+    "editRunUnavailable": "这次重发已中断，无法自动继续。已保留草稿，请刷新会话后重新编辑发送。",
+    "editConflict": "最新消息已发生变化，请刷新会话后编辑。",
+    "editNotReady": "消息正在保存，请稍后重新发送。",
+    "editAttachmentsRetained": "原附件将随修改后的消息一并发送。",
+    "editContextUnavailable": "此轮旧上下文无法安全恢复。已保留草稿，请发送新消息后再使用编辑。",
     "historicalReadOnlyNotice": "该智能体已撤销使用权限，仅可查看你已有的历史会话。",
     "historicalReadOnlyPlaceholder": "历史只读：无法创建会话或发送消息",
     "sharedReadOnlyNotice": "这是 {{owner}} 分享的只读会话，可查看完整过程但不能修改或继续对话。",
@@ -3277,6 +3285,7 @@
       }
     },
     "attachments": {
+      "upload": "上传附件",
       "tooltip": "支持文档、图片、视频、音频等多种格式",
       "tooltipImageOnly": "当前模型仅支持图片上传",
       "tooltipNoMultimodal": "当前模型未检测到多模态能力，图片或视频可能无法被正确处理",

@@ -17,6 +17,7 @@
 import React, { useMemo } from "react";
 import RequestActions from "@agentscope-ai/chat/lib/AgentScopeRuntimeWebUI/core/AgentScopeRuntime/Request/Actions";
 import { TranscriptText } from "./TranscriptText";
+import { LatestMessageEditor } from "./components/LatestMessageEditor";
 import { normalizeSandboxArtifactLinks } from "./sandboxArtifactLink";
 import { artifactDisplayName, deliveredArtifactsFromMessages, type DeliveredArtifact } from "./deliveredArtifacts";
 import { ToolResponseStatusContext } from "../../components/Chat/ToolCards/shared/ToolResponseContext";
@@ -205,13 +206,14 @@ function DefaultHostResponseCard({
   );
 }
 
-function RequestContent({ data }: { data: IAgentScopeRuntimeRequest }) {
-  return <>{data.input[0].content.map((item, index) => item.type === "text"
+function RequestContent({ data, mediaOnly = false }: { data: IAgentScopeRuntimeRequest; mediaOnly?: boolean }) {
+  return <>{data.input[0].content.filter(item => !mediaOnly || item.type !== "text").map((item, index) => item.type === "text"
     ? <TranscriptText key={index} text={item.text || ""} />
     : <HostMessage key={index} data={{role: "user", content: [item]} as IAgentScopeRuntimeMessage} />)}</>;
 }
 
 export function HostRequestCard(props: { data: ChatRequestData }) {
+  const requestData = props.data as unknown as IAgentScopeRuntimeRequest;
   const extScalar = useChatScalarSnapshot();
   const extLists = useChatListSnapshot();
 
@@ -254,9 +256,16 @@ export function HostRequestCard(props: { data: ChatRequestData }) {
   const fallback = () => (
     <>
       {contentPrepend}
-      <Bubble role="user" cards={[{code: "Text", component: RequestContent, data: props.data}]} />
-      {contentAppend}
-      <RequestActions data={props.data as AnyCardProps} />
+      <LatestMessageEditor
+        data={props.data as AnyCardProps}
+        attachments={requestData.input?.some(input => Array.isArray(input.content) && input.content.some(item => item.type !== "text"))
+          ? <RequestContent data={requestData} mediaOnly />
+          : null}
+      >
+        <Bubble role="user" cards={[{code: "Text", component: RequestContent, data: props.data}]} />
+        {contentAppend}
+        <RequestActions data={props.data as AnyCardProps} />
+      </LatestMessageEditor>
     </>
   );
 

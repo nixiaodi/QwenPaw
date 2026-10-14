@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from contextlib import aclosing
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -23,6 +24,7 @@ from .repo import (
     RunRecord,
     ToolCallRecord,
 )
+from .repo.conversation import RunStatus
 
 _EVENT_NAMESPACE = UUID("33c76c75-ea85-53e8-a931-34135efebbf7")
 
@@ -98,6 +100,18 @@ def _tool_source(event_type: str) -> str:
     return "builtin"
 
 
+def _terminal_status(wire: dict[str, Any], event_type: str) -> RunStatus | None:
+    if wire.get("object") == "response" or event_type in {"final", "error"}:
+        status = wire.get("status")
+        if status == "failed" or event_type == "error":
+            return "failed"
+        if status in {"cancelled", "canceled"}:
+            return "cancelled"
+        if status == "completed" or event_type == "final":
+            return "completed"
+    return None
+
+
 class PostgresChatRunPersistence:
     """为一个 Agent 创建不改变 wire 数据的持久化事件源包装器。"""
 
@@ -127,9 +141,7 @@ class PostgresChatRunPersistence:
             repository = self._repository.with_user(initiated_by)
             conversation_id = UUID(chat.id)
             requested_run_id = (
-                payload.get("_qwenpaw_run_id")
-                if isinstance(payload, dict)
-                else None
+                payload.get("_qwenpaw_run_id") if isinstance(payload, dict) else None
             )
             try:
                 run_id = UUID(str(requested_run_id))
@@ -151,9 +163,7 @@ class PostgresChatRunPersistence:
                 created_at=chat.created_at,
                 updated_at=chat.updated_at,
             )
-            existing_conversation = await repository.get_conversation(
-                conversation_id
-            )
+            existing_conversation = await repository.get_conversation(conversation_id)
             if existing_conversation is None:
                 await repository.create_conversation(conversation)
             elif (
@@ -167,29 +177,60 @@ class PostgresChatRunPersistence:
                     status="active",
                     updated_at=chat.updated_at,
                 )
-            await repository.create_run(
-                RunRecord(
-                    id=run_id,
-                    conversation_id=conversation_id,
-                    initiated_by=initiated_by,
-                    status="running",
-                    started_at=started_at,
-                )
+            prepared = isinstance(payload, dict) and (
+                payload.get("_qwenpaw_prepared_edit") is True
+                or payload.get("_qwenpaw_prepared_run") is True
             )
+            if prepared:
+                existing_run = await repository.get_run(run_id)
+                if (
+                    existing_run is None
+                    or existing_run.conversation_id != conversation_id
+                ):
+                    raise RuntimeError("prepared_turn_unavailable")
+                if existing_run.status not in {"queued", "running"}:
+                    raise RuntimeError("prepared_turn_already_finished")
+                await repository.start_prepared_run(run_id)
+            else:
+                await repository.create_run(
+                    RunRecord(
+                        id=run_id,
+                        conversation_id=conversation_id,
+                        initiated_by=initiated_by,
+                        status="running",
+                        started_at=started_at,
+                    )
+                )
             existing_messages = await repository.list_messages(conversation_id)
             message_sequence_offset = max(
                 (message.sequence for message in existing_messages),
                 default=0,
             )
-            sequence = 0
+            if prepared:
+                admitted_user = next(
+                    (
+                        message
+                        for message in existing_messages
+                        if message.run_id == run_id and message.role == "user"
+                    ),
+                    None,
+                )
+                if admitted_user is None or admitted_user.status == "superseded":
+                    raise RuntimeError("prepared_turn_superseded")
+                message_sequence_offset = admitted_user.sequence - 1
+            sequence = 1 if prepared else 0
             tool_calls: dict[str, ToolCallRecord] = {}
             try:
-                user_message = self._user_message(
-                    conversation_id=conversation_id,
-                    run_id=run_id,
-                    initiated_by=initiated_by,
-                    sequence=message_sequence_offset + 1,
-                    payload=payload,
+                user_message = (
+                    None
+                    if prepared
+                    else self._user_message(
+                        conversation_id=conversation_id,
+                        run_id=run_id,
+                        initiated_by=initiated_by,
+                        sequence=message_sequence_offset + 1,
+                        payload=payload,
+                    )
                 )
                 if user_message is not None:
                     sequence += 1
@@ -267,10 +308,7 @@ class PostgresChatRunPersistence:
                             message=message,
                             tool_call=tool_call,
                             attachments=attachments,
-                            terminal_status={
-                                "final": "completed",
-                                "error": "failed",
-                            }.get(event_type),
+                            terminal_status=_terminal_status(wire, event_type),
                         )
                     yield line
             except asyncio.CancelledError:
@@ -297,7 +335,86 @@ class PostgresChatRunPersistence:
                         finished_at=self._clock(),
                     )
 
-        return persisted
+        async def tracked(payload):
+            # Cover cancellation during initialization too, before the inner
+            # frame loop's try block has been entered.
+            if isinstance(payload, dict):
+                try:
+                    payload["_qwenpaw_run_id"] = str(
+                        UUID(str(payload.get("_qwenpaw_run_id")))
+                    )
+                except (ValueError, TypeError):
+                    payload["_qwenpaw_run_id"] = str(uuid4())
+            try:
+                async with aclosing(persisted(payload)) as stream:
+                    async for line in stream:
+                        yield line
+            except (asyncio.CancelledError, Exception) as exc:
+                if isinstance(payload, dict):
+                    repository = self._repository.with_user(initiated_by)
+                    run_id = UUID(str(payload["_qwenpaw_run_id"]))
+                    current = await repository.get_run(run_id)
+                    if current is not None and current.status in {"queued", "running"}:
+                        await asyncio.shield(
+                            repository.finish_run(
+                                run_id,
+                                status="cancelled"
+                                if isinstance(exc, asyncio.CancelledError)
+                                else "failed",
+                                finished_at=self._clock(),
+                            )
+                        )
+                raise
+
+        return tracked
+
+    async def prepare_turn(self, *, chat: ChatSpec, payload: dict) -> None:
+        """Admit a console user input before exposing its background stream."""
+        owner = UUID(chat.user_id)
+        repository = self._repository.with_user(owner)
+        conversation_id = UUID(chat.id)
+        if await repository.get_conversation(conversation_id) is None:
+            await repository.create_conversation(
+                ConversationRecord(
+                    id=conversation_id,
+                    agent_id=self._agent_id,
+                    owner_user_id=owner,
+                    title=chat.name,
+                    status="active",
+                    created_at=chat.created_at,
+                    updated_at=chat.updated_at,
+                )
+            )
+        run_id = UUID(payload["_qwenpaw_run_id"])
+        message = self._user_message(
+            conversation_id=conversation_id,
+            run_id=run_id,
+            initiated_by=owner,
+            sequence=0,
+            payload=payload,
+        )
+        if message is None:
+            return
+        admitted = await repository.admit_user_turn(
+            agent_id=self._agent_id,
+            run=RunRecord(
+                id=run_id,
+                conversation_id=conversation_id,
+                initiated_by=owner,
+                status="queued",
+                started_at=self._clock(),
+            ),
+            message=message,
+        )
+        for attachment_id in self._message_attachment_ids(admitted):
+            await repository.bind_attachment(
+                attachment_id=attachment_id,
+                owner_user_id=owner,
+                agent_id=self._agent_id,
+                conversation_id=conversation_id,
+                message_id=admitted.id,
+            )
+        payload["_qwenpaw_prepared_run"] = True
 
     async def _store_payload(
         self, payload: dict[str, Any], run_id: UUID, sequence: int
@@ -375,7 +492,16 @@ class PostgresChatRunPersistence:
             sequence=sequence,
             role="user",
             message_type="message",
-            content={"content": normalized},
+            content={
+                "content": normalized,
+                "metadata": {
+                    "timestamp": self._clock().isoformat(),
+                    "metadata": dict(
+                        payload.get("message_metadata") or {},
+                        qwenpaw_client_message_id=client_id,
+                    ),
+                },
+            },
             status="completed",
             created_by=initiated_by,
             created_at=self._clock(),

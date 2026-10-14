@@ -23,6 +23,15 @@ import pytest
 from qwenpaw.app.task_tracker import TaskTracker
 
 
+@pytest.mark.asyncio
+async def test_stop_before_producer_starts_closes_subscriber_queue():
+    tracker = TaskTracker()
+    queue, _ = await tracker.attach_or_start("pending", {}, _make_stream(["never"]))
+    assert await tracker.request_stop("pending") is True
+    assert await asyncio.wait_for(queue.get(), timeout=0.2) is None
+    assert "pending" not in tracker._runs
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

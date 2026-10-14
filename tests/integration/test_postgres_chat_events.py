@@ -329,6 +329,74 @@ async def test_error_wire_without_final_finishes_run_as_failed(
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("terminal_wire", "expected_status"),
+    [
+        ({"object": "response", "status": "failed"}, "failed"),
+        ({"object": "response", "status": "cancelled"}, "cancelled"),
+        (
+            {
+                "object": "message",
+                "id": "failed-answer",
+                "type": "result",
+                "role": "assistant",
+                "status": "failed",
+                "content": [],
+            },
+            "failed",
+        ),
+    ],
+)
+async def test_terminal_failure_wire_overrides_earlier_completed_message(
+    postgres_chat_runtime,
+    terminal_wire,
+    expected_status,
+) -> None:
+    runtime = postgres_chat_runtime
+    persistence = PostgresChatRunPersistence(
+        repository=runtime["repository"],
+        agent_id=runtime["agent_id"],
+    )
+    chat = ChatSpec(
+        id=str(uuid4()),
+        session_id="console:terminal-wire",
+        user_id=str(runtime["user_id"]),
+        name="流式失败终态",
+    )
+    wires = [
+        {
+            "object": "message",
+            "id": "partial-answer",
+            "type": "result",
+            "role": "assistant",
+            "status": "completed",
+            "content": [],
+        },
+        terminal_wire,
+    ]
+    lines = [f"data: {json.dumps(wire)}\n\n" for wire in wires]
+
+    async def source(_payload):
+        for line in lines:
+            yield line
+
+    payload = {}
+    wrapped = persistence.wrap_stream(
+        chat=chat,
+        initiated_by=runtime["user_id"],
+        stream_fn=source,
+    )
+    assert [line async for line in wrapped(payload)] == lines
+    run_id = UUID(payload["_qwenpaw_run_id"])
+    run = await runtime["repository"].get_run(run_id)
+    assert run.status == expected_status
+    assert run.finished_at is not None
+    events = await runtime["repository"].list_events(run_id)
+    assert [event.payload for event in events] == wires
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
 async def test_user_input_and_assistant_result_share_ordered_history(
     postgres_chat_runtime,
 ) -> None:

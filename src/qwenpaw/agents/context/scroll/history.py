@@ -445,6 +445,36 @@ class HistoryStore:
             )
             return int(cur.fetchone()["n"])
 
+    def last_sequence(self, session_id: str) -> int:
+        """Capture the recall projection boundary before a user turn."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COALESCE(MAX(seq), 0) FROM conversation_history WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+            return int(row[0])
+
+    def truncate_session_after(self, session_id: str, sequence: int) -> int:
+        """Discard superseded recall projections; PostgreSQL keeps the audit."""
+        with self._lock, self._conn:
+            rows = self._conn.execute(
+                "SELECT seq, content, name FROM conversation_history WHERE session_id = ? AND seq > ?",
+                (session_id, sequence),
+            ).fetchall()
+            if self._fts:
+                for row in rows:
+                    if row["name"] not in _RECALL_TOOL_NAMES:
+                        self._conn.execute(
+                            "INSERT INTO conversation_history_fts"
+                            "(conversation_history_fts, rowid, content) VALUES('delete', ?, ?)",
+                            (row["seq"], row["content"] or ""),
+                        )
+            self._conn.execute(
+                "DELETE FROM conversation_history WHERE session_id = ? AND seq > ?",
+                (session_id, sequence),
+            )
+            return len(rows)
+
     def claim_session(self, session_id: str, agent_id: str | None) -> int:
         """Assign legacy unowned rows in a canonical session to an agent."""
         if not session_id or not agent_id:

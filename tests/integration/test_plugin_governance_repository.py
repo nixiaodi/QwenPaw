@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import json
 from contextlib import asynccontextmanager
+from dataclasses import replace
+from types import SimpleNamespace
 from uuid import uuid4
 
+import httpx
 import pytest
 from alembic import command
 from alembic.config import Config
+from fastapi import FastAPI
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
@@ -161,6 +165,138 @@ async def test_selected_user_status_and_agent_setting_round_trip(
     assert [item.plugin_id for item in await service.list_authorized(allowed)] == [
         "database-demo"
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("upload", [False, True], ids=["path-or-market", "zip-upload"])
+async def test_default_app_install_is_visible_only_to_installer(
+    plugin_governance_database,
+    monkeypatch,
+    tmp_path,
+    upload,
+):
+    """未选择分享范围的安装应立即出现在安装者的应用中心。"""
+    from qwenpaw.app.routers import pawapps, plugins
+
+    schema, session_factory = plugin_governance_database
+    admin_id, allowed_id, _, _, _ = await _seed_users_and_agent(schema, session_factory)
+    repository = PostgresPluginGovernanceRepository(
+        schema=schema, session_factory=session_factory
+    )
+    service = PluginGovernanceService(repository)
+    manifest = {
+        "id": "installer-app",
+        "name": "Installer App",
+        "version": "1.0.0",
+        "meta": {"pawapp": {"entry_page": "/apps/installer-app"}},
+    }
+    source = tmp_path / "plugin.json"
+    source.write_text(json.dumps(manifest), encoding="utf-8")
+    record = SimpleNamespace(
+        manifest=SimpleNamespace(
+            **manifest, description="", author="", plugin_type="app"
+        ),
+        source_path=source,
+    )
+
+    async def loaded(*_args, **_kwargs):
+        return record
+
+    app = FastAPI()
+    app.state.plugin_loader = object()
+    app.state.plugin_registry = SimpleNamespace(
+        get_all_plugin_manifests=lambda: {"installer-app": manifest}
+    )
+
+    @app.middleware("http")
+    async def test_identity(request, call_next):
+        request.state.actor = (
+            _actor(allowed_id, PlatformRole.MEMBER)
+            if request.headers.get("X-Test-User") == "other"
+            else _actor(admin_id, PlatformRole.ADMIN)
+        )
+        return await call_next(request)
+
+    monkeypatch.setattr(plugins, "_load_plugin_with_optional_force_reinstall", loaded)
+    monkeypatch.setattr(plugins, "_extract_plugin_zip_bytes", lambda *_args: source)
+    for module in (plugins, pawapps):
+        monkeypatch.setattr(module, "is_multi_user_enabled", lambda: True)
+        monkeypatch.setattr(module, "get_plugin_governance_service", lambda: service)
+    app.include_router(plugins.router)
+    app.include_router(pawapps.router)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = (
+            await client.post(
+                "/plugins/upload", files={"file": ("app.zip", b"fixture")}
+            )
+            if upload
+            else await client.post("/plugins/install", json={"source": str(source)})
+        )
+        assert response.status_code == 200
+        mine = await client.get("/pawapps")
+        other = await client.get("/pawapps", headers={"X-Test-User": "other"})
+        assert mine.status_code == 200 and mine.json()["total"] == 1
+        assert mine.json()["apps"][0]["id"] == "installer-app"
+        assert other.status_code == 200 and other.json()["total"] == 0
+        projected = await repository.get_installation("installer-app")
+        assert projected.selected_user_ids == (admin_id,)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("initial_audience", ["selected_users", "all_members", "empty"])
+async def test_reinstall_without_audience_preserves_existing_access(
+    plugin_governance_database,
+    initial_audience,
+):
+    """升级重装不能清空或扩大已有授权，包括管理员明确设置的空范围。"""
+    schema, session_factory = plugin_governance_database
+    admin_id, allowed_id, denied_id, _, _ = await _seed_users_and_agent(
+        schema, session_factory
+    )
+    repository = PostgresPluginGovernanceRepository(
+        schema=schema, session_factory=session_factory
+    )
+    service = PluginGovernanceService(repository)
+    admin = _actor(admin_id, PlatformRole.ADMIN)
+    audience = (
+        AppAudience(mode="all_members")
+        if initial_audience == "all_members"
+        else AppAudience(mode="selected_users", selected_user_ids=(allowed_id,))
+        if initial_audience == "selected_users"
+        else AppAudience(mode="selected_users")
+    )
+    first = _candidate()
+    await service.register_installation(
+        admin,
+        first,
+        source_type="path",
+        source_ref="fixture",
+        content_hash="a" * 64,
+        audience=audience,
+    )
+    await service.register_installation(
+        admin,
+        replace(first, id=uuid4(), version="2.0.0"),
+        source_type="path",
+        source_ref="fixture",
+        content_hash="b" * 64,
+    )
+    after = await repository.get_installation(first.plugin_id)
+    assert after.id == first.id and after.version == "2.0.0"
+    assert after.audience_mode == audience.mode
+    assert after.selected_user_ids == audience.selected_user_ids
+    assert await repository.is_user_granted(after.id, allowed_id) is (
+        initial_audience != "empty"
+    )
+    assert await repository.is_user_granted(after.id, denied_id) is (
+        initial_audience == "all_members"
+    )
+    assert await repository.is_user_granted(after.id, admin_id) is (
+        initial_audience == "all_members"
+    )
 
 
 @pytest.mark.asyncio

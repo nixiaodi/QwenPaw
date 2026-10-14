@@ -110,6 +110,18 @@ import {
 } from "../../plugins/registry/types";
 import { ChatScalar, ChatList } from "../../plugins/registry/slotKeys";
 import { HostRequestCard, HostResponseCard } from "./HostBubbles";
+import {
+  EditMessageAction,
+  LatestMessageEditProvider,
+} from "./components/LatestMessageEditor";
+import {
+  editableHistoryTarget,
+  editFailureKey,
+  editedRequestContent,
+  editedRequestFileList,
+  type EditAttempt,
+  type EditRequestData,
+} from "./latestMessageEdit";
 import { withGenericFallback } from "../../components/Chat/ToolCards/adapters/v1Adapter";
 import { applyApprovalLevelToRequestBody } from "./approvalPayload";
 import {
@@ -1333,7 +1345,9 @@ export default function ChatPage() {
     | undefined;
   const isPublicationConversation =
     typeof publicationVersion === "string" &&
-    Boolean(lockedPublicationModel?.provider_id && lockedPublicationModel?.model);
+    Boolean(
+      lockedPublicationModel?.provider_id && lockedPublicationModel?.model,
+    );
   const queueSessionId = chatId ?? sessionApi.lastActiveChatId ?? "new";
   const backendChatId = resolveBackendChatId(chatId);
   const pendingProjectDir = backendChatId
@@ -1409,7 +1423,8 @@ export default function ChatPage() {
           agentId: selectedAgent,
           conversationId: backendChatId || undefined,
         })
-      ) return;
+      )
+        return;
       const element = event.target;
       if (!(element instanceof Element)) return;
       const anchor = element.closest<HTMLAnchorElement>("a[href]");
@@ -2482,8 +2497,24 @@ export default function ChatPage() {
   const chatIdRef = useRef(chatId);
   const navigateRef = useRef(navigate);
   const chatRef = useRef<IAgentScopeRuntimeWebUIRef>(null);
+  const pendingEditSendRef = useRef<EditAttempt | null>(null);
+  const retryEditRef = useRef<Pick<
+    EditAttempt,
+    "descriptor" | "conversationId" | "agentId" | "content"
+  > | null>(null);
+  const editSendInFlightRef = useRef<symbol | null>(null);
   const chatTransportLifecycleRef = useRef(new ChatTransportLifecycle());
   const pendingSenderClearRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    return () => {
+      const pending = pendingEditSendRef.current;
+      pendingEditSendRef.current = null;
+      retryEditRef.current = null;
+      editSendInFlightRef.current = null;
+      pending?.rejected(new Error(t("chat.editConflict")));
+    };
+  }, [selectedAgent, queueSessionId, location.pathname, t]);
 
   const clearConversationView = useCallback(() => {
     chatTransportLifecycleRef.current.abortCurrent();
@@ -3289,10 +3320,7 @@ export default function ChatPage() {
     }
   }, []);
 
-  useEffect(
-    () => () => chatTransportLifecycleRef.current.abortCurrent(),
-    [],
-  );
+  useEffect(() => () => chatTransportLifecycleRef.current.abortCurrent(), []);
 
   useEffect(() => {
     const onResume = () => {
@@ -3511,158 +3539,311 @@ export default function ChatPage() {
     [],
   );
 
+  const resendLatestMessage = useCallback(
+    async (data: EditRequestData, text: string, requestId: string) => {
+      if (editSendInFlightRef.current || chatReadOnly || !usesQwenPawBackend)
+        throw new Error(t("chat.editFailed"));
+      const submissionToken = Symbol("edit-submission");
+      editSendInFlightRef.current = submissionToken;
+      const snapshot = captureSubmissionSnapshot();
+      const pathname = window.location.pathname;
+      const isCurrent = () =>
+        sessionApi.isActiveOwner(snapshot.owner) &&
+        selectedAgentRef.current === snapshot.agentId &&
+        queueSessionIdRef.current === snapshot.queueSessionId &&
+        window.location.pathname === pathname;
+      const backup = chatRef.current?.messages.getMessages() || [];
+      const targetIndex = backup.map((item) => item.role).lastIndexOf("user");
+      const latestData = backup[targetIndex]?.cards?.find(
+        (card) => card.code === "AgentScopeRuntimeRequestCard",
+      )?.data;
+      let started = false;
+      try {
+        if (latestData !== data) throw new Error(t("chat.editConflict"));
+        let conversationId = snapshot.backendChatId;
+        for (let attempt = 0; !conversationId && attempt < 20; attempt++) {
+          await sessionApi.getSessionList();
+          if (!isCurrent()) throw new Error(t("chat.editConflict"));
+          conversationId = resolveBackendChatId(
+            sessionApi.getRealIdForSession(snapshot.queueSessionId) ||
+              chatIdRef.current,
+          );
+          if (!conversationId)
+            await new Promise((resolve) => setTimeout(resolve, 150));
+        }
+        if (!conversationId) throw new Error(t("chat.editNotReady"));
+        const history = await chatApi.getChat(conversationId);
+        const input =
+          data.input?.filter((item) => item.role === "user").slice(-1)[0] ||
+          data.input?.slice(-1)[0];
+        const target = input
+          ? editableHistoryTarget(history.messages, input)
+          : null;
+        const retry = retryEditRef.current;
+        const retryDescriptor =
+          retry?.descriptor.request_id === requestId &&
+          retry.conversationId === conversationId &&
+          retry.agentId === snapshot.agentId
+            ? retry.descriptor
+            : null;
+        if ((!target && !retryDescriptor) || !isCurrent())
+          throw new Error(t("chat.editConflict"));
+        const descriptor = retryDescriptor || {
+          message_id: String(target!.id),
+          request_id: requestId,
+        };
+        const content = editedRequestContent(input?.content, text);
+        retryEditRef.current = {
+          descriptor,
+          conversationId,
+          agentId: snapshot.agentId,
+          content,
+        };
+        const accepted = new Promise<void>((resolve, reject) => {
+          pendingEditSendRef.current = {
+            descriptor,
+            content,
+            conversationId: conversationId!,
+            agentId: snapshot.agentId,
+            isCurrent,
+            accepted: resolve,
+            rejected: reject,
+          };
+        });
+        chatTransportLifecycleRef.current.abortCurrent();
+        runtimeLoadingBridgeRef.current?.setLoading?.(false);
+        setChatLoading(false);
+        replaceRuntimeMessageSnapshot(
+          chatRef.current?.messages,
+          backup.slice(0, targetIndex),
+        );
+        started = true;
+        chatRef.current?.input.submit({
+          query: text,
+          fileList: editedRequestFileList(content),
+        });
+        await accepted;
+        if (editSendInFlightRef.current === submissionToken)
+          retryEditRef.current = null;
+        sessionApi.invalidateConvertedCache(conversationId);
+      } catch (error) {
+        if (editSendInFlightRef.current === submissionToken)
+          pendingEditSendRef.current = null;
+        if (started && isCurrent()) {
+          await new Promise((resolve) => setTimeout(resolve, 0));
+          if (!isCurrent()) throw error;
+          replaceRuntimeMessageSnapshot(chatRef.current?.messages, backup);
+          runtimeLoadingBridgeRef.current?.setLoading?.(false);
+          setChatLoading(false);
+        }
+        throw error;
+      } finally {
+        if (editSendInFlightRef.current === submissionToken)
+          editSendInFlightRef.current = null;
+      }
+    },
+    [captureSubmissionSnapshot, chatReadOnly, usesQwenPawBackend, t],
+  );
+
   const customFetch = useCallback(
     async (data: {
       input?: Array<Record<string, unknown>>;
       biz_params?: Record<string, unknown>;
       signal?: AbortSignal;
     }): Promise<Response> => {
-      if (chatReadOnly) {
-        message.warning(
-          t(
-            conversationReadOnly
-              ? "chat.sharedReadOnlyNotice"
-              : "chat.historicalReadOnlyNotice",
-          ),
-        );
-        return new Response(
-          JSON.stringify({ detail: "historical_read_only" }),
-          {
-            status: 403,
-            headers: { "Content-Type": "application/json" },
-          },
-        );
-      }
-      const directSubmission = pendingDirectSubmissionRef.current;
-      pendingDirectSubmissionRef.current = null;
-      const requestAgentId = directSubmission?.agentId ?? selectedAgent;
-      const requestUsesQwenPawBackend =
-        directSubmission?.usesQwenPawBackend ?? usesQwenPawBackend;
-      const headers: Record<string, string> = {
-        "Content-Type": "application/json",
-        ...buildAuthHeaders(),
-      };
-      headers["X-Agent-Id"] = requestAgentId;
-
-      if (requestUsesQwenPawBackend) {
-        try {
-          const activeModels = await loadConversationModel();
-          if (
-            !activeModels?.active_llm?.provider_id ||
-            !activeModels?.active_llm?.model
-          ) {
-            pendingSenderClearRef.current = null;
-            setShowModelPrompt(true);
-            return buildModelError();
-          }
-        } catch (error) {
-          pendingSenderClearRef.current = null;
-          return buildModelLoadError(error);
+      const editAttempt = pendingEditSendRef.current;
+      pendingEditSendRef.current = null;
+      try {
+        if (editAttempt && !editAttempt.isCurrent()) {
+          editAttempt.rejected(new Error(t("chat.editConflict")));
+          return new Response("", {
+            headers: { "Content-Type": "text/event-stream" },
+          });
         }
-      }
-
-      const submittedValue = pendingSenderClearRef.current;
-      if (submittedValue !== null) {
-        clearSubmittedSenderInput(submittedValue);
-        pendingSenderClearRef.current = null;
-        localStorage.removeItem(getDraftStorageKey(requestAgentId));
-      }
-
-      const { input = [], biz_params } = data;
-      const session: SessionInfo = input[input.length - 1]?.session || {};
-      const lastInput = input.slice(-1);
-      const lastMsg = lastInput[0];
-      const clientMessageId =
-        lastMsg?.role === "user" ? createClientMessageId() : undefined;
-      const rewrittenLastMsg: Record<string, unknown> | undefined = lastMsg
-        ? clientMessageId
-          ? attachClientMessageId(lastMsg, clientMessageId)
-          : lastMsg
-        : undefined;
-      const normalizedInput: Array<Record<string, unknown>> =
-        rewrittenLastMsg?.content && Array.isArray(rewrittenLastMsg.content)
-          ? [
-              {
-                ...rewrittenLastMsg,
-                content: rewrittenLastMsg.content.map(normalizeContentUrls),
-              },
-            ]
-          : rewrittenLastMsg
-          ? [rewrittenLastMsg]
-          : [];
-      const mentionRewrite =
-        rewritePersonalLibraryMentionsInInput(normalizedInput);
-      const fileRewrite = rewriteFileMentions(mentionRewrite.input);
-      const rewrittenInput = fileRewrite.input;
-      const personalLibraryDocumentIds = [
-        ...new Set(mentionRewrite.documentIds),
-      ];
-
-      const identity =
-        directSubmission?.identity ?? sessionApi.getSessionIdentity();
-      let requestBody: Record<string, unknown> = {
-        input: rewrittenInput,
-        session_id: identity.sessionId || session?.session_id || "",
-        user_id: identity.userId || session?.user_id || DEFAULT_USER_ID,
-        channel: identity.channel || session?.channel || DEFAULT_CHANNEL,
-        stream: true,
-        ...biz_params,
-      };
-      const requestedModel = draftModel();
-      if (requestedModel) requestBody.requested_model = requestedModel;
-
-      for (const entry of sortByOrder(
-        extLists[ChatList.requestPayloadTransforms],
-      )) {
-        const next = entry.item.transform({
-          payload: requestBody,
-          sessionId: String(requestBody.session_id || ""),
-          selectedAgent: requestAgentId,
-        });
-        if (next && typeof next === "object") {
-          requestBody = next;
-        }
-      }
-
-      let projectSessionId: string | null = null;
-      let appliedProjectDir: string | null = null;
-
-      if (clientMessageId && Array.isArray(requestBody.input)) {
-        const requestInput = [...requestBody.input] as Array<
-          Record<string, unknown>
-        >;
-        for (let i = requestInput.length - 1; i >= 0; i--) {
-          if (requestInput[i]?.role !== "user") continue;
-          requestInput[i] = attachClientMessageId(
-            requestInput[i],
-            clientMessageId,
+        if (chatReadOnly) {
+          editAttempt?.rejected(new Error(t("chat.editFailed")));
+          message.warning(
+            t(
+              conversationReadOnly
+                ? "chat.sharedReadOnlyNotice"
+                : "chat.historicalReadOnlyNotice",
+            ),
           );
-          requestBody.input = requestInput;
-          break;
+          return new Response(
+            JSON.stringify({ detail: "historical_read_only" }),
+            {
+              status: 403,
+              headers: { "Content-Type": "application/json" },
+            },
+          );
         }
-      }
-      if (requestUsesQwenPawBackend) {
-        applyApprovalLevelToRequestBody(
-          requestBody,
-          sessionApprovalLevelRef.current,
-          runningConfigApprovalLevel,
-        );
-        projectSessionId =
-          directSubmission?.queueSessionId ??
-          sessionApi.lastActiveChatId ??
-          chatIdRef.current ??
-          String(requestBody.session_id || "new");
-        const pendingRequest = withPendingProjectDirectory(
-          requestBody,
-          requestAgentId,
-          projectSessionId,
-        );
-        requestBody = pendingRequest.requestBody;
-        appliedProjectDir = pendingRequest.projectDir ?? null;
-        if (
-          personalLibraryDocumentIds.length > 0 ||
-          fileRewrite.references.length > 0
-        ) {
+        const directSubmission = pendingDirectSubmissionRef.current;
+        pendingDirectSubmissionRef.current = null;
+        const requestAgentId = directSubmission?.agentId ?? selectedAgent;
+        const requestUsesQwenPawBackend =
+          directSubmission?.usesQwenPawBackend ?? usesQwenPawBackend;
+        const headers: Record<string, string> = {
+          "Content-Type": "application/json",
+          ...buildAuthHeaders(),
+        };
+        headers["X-Agent-Id"] = requestAgentId;
+
+        if (requestUsesQwenPawBackend) {
+          try {
+            const activeModels = await loadConversationModel();
+            if (
+              !activeModels?.active_llm?.provider_id ||
+              !activeModels?.active_llm?.model
+            ) {
+              editAttempt?.rejected(new Error(t("chat.editFailed")));
+              pendingSenderClearRef.current = null;
+              setShowModelPrompt(true);
+              return buildModelError();
+            }
+          } catch (error) {
+            editAttempt?.rejected(
+              error instanceof Error ? error : new Error(t("chat.editFailed")),
+            );
+            pendingSenderClearRef.current = null;
+            return buildModelLoadError(error);
+          }
+        }
+
+        const submittedValue = pendingSenderClearRef.current;
+        if (editAttempt && !editAttempt.isCurrent()) {
+          editAttempt.rejected(new Error(t("chat.editConflict")));
+          return new Response("", {
+            headers: { "Content-Type": "text/event-stream" },
+          });
+        }
+        if (submittedValue !== null) {
+          clearSubmittedSenderInput(submittedValue);
+          pendingSenderClearRef.current = null;
+          localStorage.removeItem(getDraftStorageKey(requestAgentId));
+        }
+
+        const { input = [], biz_params } = data;
+        const session: SessionInfo = input[input.length - 1]?.session || {};
+        const lastInput = input.slice(-1);
+        const lastMsg = lastInput[0];
+        const clientMessageId =
+          lastMsg?.role === "user"
+            ? editAttempt?.descriptor.request_id || createClientMessageId()
+            : undefined;
+        if (lastMsg && clientMessageId) {
+          // Keep the optimistic card identifiable before its history reload.
+          lastMsg.metadata = attachClientMessageId(
+            lastMsg,
+            clientMessageId,
+          ).metadata;
+          if (editAttempt) lastMsg.content = editAttempt.content;
+        }
+        const rewrittenLastMsg: Record<string, unknown> | undefined = lastMsg
+          ? clientMessageId
+            ? attachClientMessageId(lastMsg, clientMessageId)
+            : lastMsg
+          : undefined;
+        const normalizedInput: Array<Record<string, unknown>> =
+          rewrittenLastMsg?.content && Array.isArray(rewrittenLastMsg.content)
+            ? [
+                {
+                  ...rewrittenLastMsg,
+                  content: rewrittenLastMsg.content.map(normalizeContentUrls),
+                },
+              ]
+            : rewrittenLastMsg
+            ? [rewrittenLastMsg]
+            : [];
+        const mentionRewrite =
+          rewritePersonalLibraryMentionsInInput(normalizedInput);
+        const fileRewrite = rewriteFileMentions(mentionRewrite.input);
+        const rewrittenInput = fileRewrite.input;
+        const personalLibraryDocumentIds = [
+          ...new Set(mentionRewrite.documentIds),
+        ];
+
+        const identity =
+          directSubmission?.identity ?? sessionApi.getSessionIdentity();
+        let requestBody: Record<string, unknown> = {
+          input: rewrittenInput,
+          session_id: identity.sessionId || session?.session_id || "",
+          user_id: identity.userId || session?.user_id || DEFAULT_USER_ID,
+          channel: identity.channel || session?.channel || DEFAULT_CHANNEL,
+          stream: true,
+          ...biz_params,
+        };
+        const requestedModel = draftModel();
+        if (requestedModel) requestBody.requested_model = requestedModel;
+
+        for (const entry of sortByOrder(
+          extLists[ChatList.requestPayloadTransforms],
+        )) {
+          const next = entry.item.transform({
+            payload: requestBody,
+            sessionId: String(requestBody.session_id || ""),
+            selectedAgent: requestAgentId,
+          });
+          if (next && typeof next === "object") {
+            requestBody = next;
+          }
+        }
+
+        let projectSessionId: string | null = null;
+        let appliedProjectDir: string | null = null;
+
+        if (clientMessageId && Array.isArray(requestBody.input)) {
+          const requestInput = [...requestBody.input] as Array<
+            Record<string, unknown>
+          >;
+          for (let i = requestInput.length - 1; i >= 0; i--) {
+            if (requestInput[i]?.role !== "user") continue;
+            requestInput[i] = attachClientMessageId(
+              requestInput[i],
+              clientMessageId,
+            );
+            requestBody.input = requestInput;
+            break;
+          }
+        }
+        if (requestUsesQwenPawBackend) {
+          applyApprovalLevelToRequestBody(
+            requestBody,
+            sessionApprovalLevelRef.current,
+            runningConfigApprovalLevel,
+          );
+          projectSessionId =
+            directSubmission?.queueSessionId ??
+            sessionApi.lastActiveChatId ??
+            chatIdRef.current ??
+            String(requestBody.session_id || "new");
+          const pendingRequest = withPendingProjectDirectory(
+            requestBody,
+            requestAgentId,
+            projectSessionId,
+          );
+          requestBody = pendingRequest.requestBody;
+          appliedProjectDir = pendingRequest.projectDir ?? null;
+          if (
+            personalLibraryDocumentIds.length > 0 ||
+            fileRewrite.references.length > 0
+          ) {
+            const currentContext =
+              requestBody.request_context &&
+              typeof requestBody.request_context === "object"
+                ? (requestBody.request_context as Record<string, unknown>)
+                : {};
+            requestBody.request_context = {
+              ...currentContext,
+              file_references: [
+                ...fileRewrite.references,
+                ...personalLibraryDocumentIds.map((id) => ({
+                  source: "personal_library",
+                  id,
+                })),
+              ],
+            };
+          }
+        } else if (Object.keys(backendControlsRef.current).length > 0) {
           const currentContext =
             requestBody.request_context &&
             typeof requestBody.request_context === "object"
@@ -3670,100 +3851,140 @@ export default function ChatPage() {
               : {};
           requestBody.request_context = {
             ...currentContext,
-            file_references: [
-              ...fileRewrite.references,
-              ...personalLibraryDocumentIds.map((id) => ({
-                source: "personal_library",
-                id,
-              })),
-            ],
+            backend_controls: backendControlsRef.current,
           };
         }
-      } else if (Object.keys(backendControlsRef.current).length > 0) {
-        const currentContext =
-          requestBody.request_context &&
-          typeof requestBody.request_context === "object"
-            ? (requestBody.request_context as Record<string, unknown>)
-            : {};
-        requestBody.request_context = {
-          ...currentContext,
-          backend_controls: backendControlsRef.current,
-        };
-      }
 
-      const backendChatId =
-        directSubmission?.backendChatId ??
-        sessionApi.getRealIdForSession(String(requestBody.session_id || "")) ??
-        chatIdRef.current ??
-        String(requestBody.session_id || "");
-      const existingConversationId = resolveBackendChatId(backendChatId);
-      if (existingConversationId) {
-        requestBody.conversation_id = existingConversationId;
-      }
-      if (backendChatId) {
-        const userText = rewrittenInput
-          .filter((m) => m.role === "user")
-          .map(extractUserMessageText)
-          .join("\n")
-          .trim();
-        if (userText) {
-          // Also pass the full content array so patchLastUserMessage can
-          // rebuild user card with images/files when reconnecting.
-          const lastUserMsg = rewrittenInput
+        const backendChatId =
+          directSubmission?.backendChatId ??
+          sessionApi.getRealIdForSession(
+            String(requestBody.session_id || ""),
+          ) ??
+          chatIdRef.current ??
+          String(requestBody.session_id || "");
+        const existingConversationId = resolveBackendChatId(backendChatId);
+        if (existingConversationId) {
+          requestBody.conversation_id = existingConversationId;
+        }
+        if (editAttempt) {
+          requestBody.conversation_id = editAttempt.conversationId;
+          requestBody.edit_last_message = editAttempt.descriptor;
+        }
+        if (backendChatId) {
+          const userText = rewrittenInput
             .filter((m) => m.role === "user")
-            .slice(-1)[0];
-          const contentArr = Array.isArray(lastUserMsg?.content)
-            ? (lastUserMsg.content as Array<{
-                type: string;
-                [key: string]: unknown;
-              }>)
-            : undefined;
-          sessionApi.setLastUserMessage(
-            backendChatId,
-            userText,
-            contentArr,
-            clientMessageId,
+            .map(extractUserMessageText)
+            .join("\n")
+            .trim();
+          if (userText) {
+            // Also pass the full content array so patchLastUserMessage can
+            // rebuild user card with images/files when reconnecting.
+            const lastUserMsg = rewrittenInput
+              .filter((m) => m.role === "user")
+              .slice(-1)[0];
+            const contentArr = Array.isArray(lastUserMsg?.content)
+              ? (lastUserMsg.content as Array<{
+                  type: string;
+                  [key: string]: unknown;
+                }>)
+              : undefined;
+            sessionApi.setLastUserMessage(
+              backendChatId,
+              userText,
+              contentArr,
+              clientMessageId,
+            );
+          }
+        }
+
+        headlineStreamFilterRef.current = createHeadlineFilterState();
+
+        const requestOwner =
+          directSubmission?.owner ?? sessionApi.getActiveOwner();
+        const sentLocalId =
+          directSubmission?.queueSessionId ??
+          sessionApi.lastActiveChatId ??
+          chatIdRef.current;
+        const transportSignal = chatTransportLifecycleRef.current.begin(
+          data.signal,
+        );
+        let response: Response;
+        try {
+          response = await fetch(getApiUrl("/console/chat"), {
+            method: "POST",
+            headers,
+            body: JSON.stringify(requestBody),
+            signal: transportSignal,
+          });
+        } catch (error) {
+          if (editAttempt && backendChatId)
+            sessionApi.discardLastUserMessage(backendChatId, clientMessageId);
+          editAttempt?.rejected(
+            error instanceof Error ? error : new Error(t("chat.editFailed")),
+          );
+          throw error;
+        }
+        if (editAttempt) {
+          if (response.ok) editAttempt.accepted();
+          else {
+            if (backendChatId)
+              sessionApi.discardLastUserMessage(backendChatId, clientMessageId);
+            const errorBody = await response
+              .clone()
+              .json()
+              .catch(() => null);
+            editAttempt.rejected(
+              new Error(t(editFailureKey(response.status, errorBody?.detail))),
+            );
+            // The editor shows the failure; avoid inserting a second error turn.
+            return new Response("", {
+              headers: { "Content-Type": "text/event-stream" },
+            });
+          }
+        }
+        if (
+          response.ok &&
+          response.headers.get("X-QwenPaw-Can-Edit") === "true" &&
+          lastMsg
+        ) {
+          lastMsg.metadata = {
+            ...((lastMsg.metadata as Record<string, unknown>) || {}),
+            qwenpaw_editable: true,
+          };
+        }
+
+        if (!response.ok && backendChatId) {
+          sessionApi.discardLastUserMessage(backendChatId, clientMessageId);
+        }
+
+        const localIdToResolve = sentLocalId;
+        if (response.ok && localIdToResolve) {
+          if (appliedProjectDir && projectSessionId) {
+            setPendingProjectDirectory(requestAgentId, projectSessionId, null);
+          }
+          const resolvedId = response.headers.get("X-QwenPaw-Chat-Id");
+          if (resolvedId)
+            sessionApi.acceptResolvedChat(
+              localIdToResolve,
+              resolvedId,
+              requestOwner,
+            );
+          else sessionApi.triggerResolve(localIdToResolve);
+        }
+
+        return wrapChatResponseUsageStream(response, chatRef);
+      } catch (error) {
+        if (editAttempt) {
+          sessionApi.discardLastUserMessage(
+            editAttempt.conversationId,
+            editAttempt.descriptor.request_id,
+          );
+          editAttempt.rejected(
+            error instanceof Error ? error : new Error(t("chat.editFailed")),
           );
         }
+        throw error;
       }
-
-      headlineStreamFilterRef.current = createHeadlineFilterState();
-
-      const requestOwner =
-        directSubmission?.owner ?? sessionApi.getActiveOwner();
-      const sentLocalId =
-        directSubmission?.queueSessionId ??
-        sessionApi.lastActiveChatId ??
-        chatIdRef.current;
-      const transportSignal =
-        chatTransportLifecycleRef.current.begin(data.signal);
-      const response = await fetch(getApiUrl("/console/chat"), {
-        method: "POST",
-        headers,
-        body: JSON.stringify(requestBody),
-        signal: transportSignal,
-      });
-
-      if (!response.ok && backendChatId) {
-        sessionApi.discardLastUserMessage(backendChatId, clientMessageId);
-      }
-
-      const localIdToResolve = sentLocalId;
-      if (response.ok && localIdToResolve) {
-        if (appliedProjectDir && projectSessionId) {
-          setPendingProjectDirectory(requestAgentId, projectSessionId, null);
-        }
-        const resolvedId = response.headers.get("X-QwenPaw-Chat-Id");
-        if (resolvedId)
-          sessionApi.acceptResolvedChat(
-            localIdToResolve,
-            resolvedId,
-            requestOwner,
-          );
-        else sessionApi.triggerResolve(localIdToResolve);
-      }
-
-      return wrapChatResponseUsageStream(response, chatRef);
     },
     [
       extLists,
@@ -3786,17 +4007,6 @@ export default function ChatPage() {
     }) => {
       const { file, onSuccess, onError, onProgress } = options;
       try {
-        // Warn when model has no multimodal support
-        if (usesQwenPawBackend && !multimodalCaps.supportsMultimodal) {
-          message.warning(t("chat.attachments.multimodalWarning"));
-        } else if (
-          multimodalCaps.supportsImage &&
-          !multimodalCaps.supportsVideo &&
-          !file.type.startsWith("image/")
-        ) {
-          // Warn (not block) when only image is supported
-          message.warning(t("chat.attachments.imageOnlyWarning"));
-        }
         const sizeMb = file.size / 1024 / 1024;
         const uploadLimit = useUploadLimitStore.getState().uploadMaxSizeMb;
         if (uploadLimit !== null && sizeMb > uploadLimit) {
@@ -3833,7 +4043,7 @@ export default function ChatPage() {
         onError?.(e instanceof Error ? e : new Error(String(e)));
       }
     },
-    [chatId, multimodalCaps, t, usesQwenPawBackend],
+    [chatId, t],
   );
 
   const compactSender = filesDrawerState.kind === "workspace";
@@ -3881,6 +4091,10 @@ export default function ChatPage() {
       const value = inputData.query.trim();
       if (!value) return false;
       const snapshot = captureSubmissionSnapshot();
+      if (pendingEditSendRef.current) {
+        pendingDirectSubmissionRef.current = snapshot;
+        return true;
+      }
 
       // Serialize the asynchronous status decisions. Two rapid clicks must
       // not both observe an idle backend and both bypass the queue.
@@ -4148,7 +4362,11 @@ export default function ChatPage() {
             ) : !chatReadOnly && backendCapabilities?.model_selection ? (
               <HarnessModelSelector providerId={selectedAgentBackend} />
             ) : null}
-            <ConversationAttachments agentId={selectedAgent} conversationId={backendChatId || undefined} refreshKey={chatLoading} />
+            <ConversationAttachments
+              agentId={selectedAgent}
+              conversationId={backendChatId || undefined}
+              refreshKey={chatLoading}
+            />
             <ChatActionGroup
               onToggleWorkspace={toggleFilesWorkspace}
               workspaceOpen={filesWorkspaceOpen}
@@ -4196,7 +4414,10 @@ export default function ChatPage() {
                 )}
               />
             )}
-            <TaskInteractionPanel planEnabled={planEnabled} running={Boolean(chatLoading)} />
+            <TaskInteractionPanel
+              planEnabled={planEnabled}
+              running={Boolean(chatLoading)}
+            />
             {isQueueOnlyTab && (
               <Alert
                 type="info"
@@ -4285,12 +4506,7 @@ export default function ChatPage() {
                 trigger: function (props: any) {
                   const uploadLimit =
                     useUploadLimitStore.getState().uploadMaxSizeMb;
-                  const tooltipKey = multimodalCaps.supportsMultimodal
-                    ? multimodalCaps.supportsImage &&
-                      !multimodalCaps.supportsVideo
-                      ? "chat.attachments.tooltipImageOnly"
-                      : "chat.attachments.tooltip"
-                    : "chat.attachments.tooltipNoMultimodal";
+                  const tooltipKey = "chat.attachments.tooltip";
                   const tooltipTitle =
                     uploadLimit !== null
                       ? `${t(tooltipKey)}, ${t(
@@ -4303,6 +4519,7 @@ export default function ChatPage() {
                   return (
                     <Tooltip title={tooltipTitle}>
                       <IconButton
+                        aria-label={t("chat.attachments.upload")}
                         disabled={props?.disabled}
                         icon={<SparkAttachmentLine />}
                         bordered={false}
@@ -4359,7 +4576,10 @@ export default function ChatPage() {
             // which already contains any ordinary trailing prefix. Use the
             // flushed delta only when that canonical output is absent, so it
             // is neither lost nor duplicated.
-            if (!output || (Array.isArray(output) && output.length === 0)) {
+            if (
+              !payload.qwenpaw_completion_only &&
+              (!output || (Array.isArray(output) && output.length === 0))
+            ) {
               const errorMsg =
                 (payload.error as any)?.message || t("chat.emptyOutputError");
               payload.output = [
@@ -4537,6 +4757,11 @@ export default function ChatPage() {
             },
           },
           ...pluginRequestActions,
+          {
+            render: ({ data }: { data: EditRequestData }) => (
+              <EditMessageAction data={data} />
+            ),
+          },
         ],
       },
     } as unknown as IAgentScopeRuntimeWebUIOptions;
@@ -4651,11 +4876,17 @@ export default function ChatPage() {
               void openInlineFileReference(reference, trigger)
             }
           >
-            <AgentScopeRuntimeWebUI
-              ref={chatRef}
-              key={refreshKey}
-              options={options}
-            />
+            <LatestMessageEditProvider
+              enabled={usesQwenPawBackend && !chatReadOnly && !hasQueueItems}
+              scopeKey={`${selectedAgent}:${queueSessionId}`}
+              resend={resendLatestMessage}
+            >
+              <AgentScopeRuntimeWebUI
+                ref={chatRef}
+                key={refreshKey}
+                options={options}
+              />
+            </LatestMessageEditProvider>
           </RichFileReferenceInputProvider>
         </div>
 

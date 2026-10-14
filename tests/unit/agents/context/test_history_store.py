@@ -39,6 +39,20 @@ def test_append_assigns_increasing_seq_and_counts(store: HistoryStore):
     assert store.count("other") == 0
 
 
+def test_revised_turn_leaves_other_sessions_and_previous_turns_recallable(store):
+    boundary = store.append(session_id="chat", dedup_key="before", entry=_entry("before"))
+    store.append(session_id="chat", dedup_key="old", entry=_entry("old answer"))
+    other = store.append(session_id="other", dedup_key="other", entry=_entry("other"))
+    assert store.last_sequence("chat") > boundary
+    assert store.truncate_session_after("chat", boundary) == 1
+    assert store.count("chat") == 1
+    assert store.contents_by_seqs({boundary, other}) == {boundary: "before", other: "other"}
+    if store._fts:
+        assert not store._conn.execute(
+            "SELECT rowid FROM conversation_history_fts WHERE conversation_history_fts MATCH 'answer'"
+        ).fetchall()
+
+
 def test_created_at_index_exists_for_date_filtered_recall(
     store: HistoryStore,
 ):

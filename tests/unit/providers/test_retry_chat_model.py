@@ -2,6 +2,8 @@
 # pylint: disable=protected-access,too-few-public-methods
 from __future__ import annotations
 
+import asyncio
+
 from types import SimpleNamespace
 from typing import Any, AsyncGenerator, cast
 
@@ -49,6 +51,128 @@ async def _successful_stream() -> AsyncGenerator[Any, None]:
     yield SimpleNamespace(content="ok")
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "mode",
+    [
+        "early",
+        "partial",
+        "tools",
+        "text_then_tools",
+        "persistent",
+        "cancel",
+        "cancel_tools",
+    ],
+)
+async def test_incomplete_stream_recovery_is_bounded_and_does_not_replay_partial_output(
+    mode,
+):
+    openai = pytest.importorskip("openai")
+
+    class Model:
+        model = "disconnect-" + mode
+        stream = True
+        parameters = None
+        context_size = 32768
+        _provider_id = "unit"
+        calls = 0
+        closed = 0
+
+        async def __call__(self, *args, **kwargs):
+            self.calls += 1
+
+            async def frames():
+                try:
+                    if self.calls == 1 or mode == "persistent":
+                        if mode == "partial":
+                            yield SimpleNamespace(content="unfinished answer")
+                        if mode == "text_then_tools":
+                            yield SimpleNamespace(
+                                content=[TextBlock(text="visible text")]
+                            )
+                        if mode in {"tools", "text_then_tools", "cancel_tools"}:
+                            yield SimpleNamespace(
+                                content=[
+                                    ToolCallBlock(
+                                        id="failed-tool",
+                                        name="read_file",
+                                        input='{"path":"unfinished.pdf"}',
+                                    )
+                                ]
+                            )
+                        if mode in {"cancel", "cancel_tools"}:
+                            raise asyncio.CancelledError()
+                        raise openai.APIError(
+                            "stream closed before response.completed",
+                            request=None,
+                            body=None,
+                        )
+                    if mode == "tools":
+                        for fragment in (
+                            '{"path":"complete',
+                            '.pdf"}',
+                            '{"path":"complete.pdf"}',
+                        ):
+                            yield SimpleNamespace(
+                                content=[
+                                    ToolCallBlock(
+                                        id="successful-tool",
+                                        name="read_file",
+                                        input=fragment,
+                                    )
+                                ]
+                            )
+                    else:
+                        yield SimpleNamespace(content="complete answer")
+                finally:
+                    self.closed += 1
+
+            return frames()
+
+    inner = Model()
+    model = RetryChatModel(
+        inner,
+        retry_config=RetryConfig(max_retries=1, backoff_base=0.1, backoff_cap=0.1),
+        rate_limit_config=RateLimitConfig(max_qpm=0, jitter_range=0.0),
+    )
+    try:
+        result = await model(messages=[{"role": "user", "content": "test"}])
+        received = []
+
+        async def consume():
+            async for chunk in result:
+                received.append(chunk.content)
+
+        if mode in {"early", "tools"}:
+            await consume()
+            if mode == "tools":
+                assert [blocks[0].id for blocks in received] == ["successful-tool"] * 3
+                assert [blocks[0].input for blocks in received] == [
+                    '{"path":"complete',
+                    '.pdf"}',
+                    '{"path":"complete.pdf"}',
+                ]
+            else:
+                assert received == ["complete answer"]
+            assert inner.calls == 2
+        elif mode in {"cancel", "cancel_tools"}:
+            with pytest.raises(asyncio.CancelledError):
+                await consume()
+            assert inner.calls == 1
+        else:
+            with pytest.raises(openai.APIError):
+                await consume()
+            assert inner.calls == (1 if mode in {"partial", "text_then_tools"} else 2)
+            if mode == "text_then_tools":
+                assert len(received) == 1
+                assert received[0][0].text == "visible text"
+            else:
+                assert received == (["unfinished answer"] if mode == "partial" else [])
+        assert inner.closed == inner.calls
+    finally:
+        _limiters.pop(model.model_key, None)
+
+
 class _ReasoningRetryStreamModel:
     model = "reasoning-stream-test"
     stream = True
@@ -94,9 +218,7 @@ class _ReasoningRetryMsgStreamModel:
         formatted = await self.formatter.format(messages)
         self.formatted_calls.append(formatted)
         assistants = [
-            message
-            for message in formatted
-            if message.get("role") == "assistant"
+            message for message in formatted if message.get("role") == "assistant"
         ]
         if any("reasoning_content" not in message for message in assistants):
             return _failing_reasoning_stream()
@@ -123,6 +245,38 @@ def test_is_retryable_non_retryable_code() -> None:
 
 def test_is_retryable_no_status_code() -> None:
     assert _is_retryable(Exception("plain")) is False
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "stream error: stream disconnected before completion: stream closed before response.completed",
+        "stream closed before response.completed",
+    ],
+)
+def test_is_retryable_openai_incomplete_response_stream(message):
+    openai = pytest.importorskip("openai")
+    exc = openai.APIError(
+        message,
+        request=None,
+        body={"error": {"type": "server_error", "message": message}},
+    )
+    assert _extract_status_code(exc) is None
+    assert _is_retryable(exc) is True
+
+
+def test_incomplete_response_message_does_not_override_nonretryable_status():
+    openai = pytest.importorskip("openai")
+    exc = openai.APIError(
+        "stream closed before response.completed",
+        request=None,
+        body={"status_code": 400},
+    )
+    assert _is_retryable(exc) is False
+    assert (
+        _is_retryable(openai.APIError("invalid API key", request=None, body=None))
+        is False
+    )
 
 
 def test_extract_status_code_from_body_top_level() -> None:
@@ -650,12 +804,14 @@ async def test_stream_recovers_agentscope_msg_via_formatter_fallback() -> None:
             for message in inner.formatted_calls[1]
             if message.get("role") == "assistant"
         ]
-        assert [
-            message.get("reasoning_content") for message in first_assistants
-        ] == ["real tool reasoning", None]
-        assert [
-            message.get("reasoning_content") for message in second_assistants
-        ] == ["real tool reasoning", " "]
+        assert [message.get("reasoning_content") for message in first_assistants] == [
+            "real tool reasoning",
+            None,
+        ]
+        assert [message.get("reasoning_content") for message in second_assistants] == [
+            "real tool reasoning",
+            " ",
+        ]
         assert inner.formatter._qwenpaw_require_reasoning_content is True
         assert cache.get(model_key, "needs_reasoning_content") is True
         assert [block.type for block in messages[0].content] == [

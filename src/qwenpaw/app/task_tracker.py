@@ -10,7 +10,7 @@ from __future__ import annotations
 from ..platform_ops.maintenance_lifecycle import admitted_stream
 
 import asyncio
-from contextlib import aclosing
+from contextlib import aclosing, asynccontextmanager
 import json
 import logging
 import weakref
@@ -39,6 +39,7 @@ class _RunState:
     finish_time: Optional[datetime] = None
     owner: object | None = None
     access_scope: str | None = None
+    run_id: str | None = None
 
 
 class TaskTracker:
@@ -53,12 +54,26 @@ class TaskTracker:
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
         self._runs: dict[str, _RunState] = {}
+        self._submission_locks: weakref.WeakValueDictionary[
+            str, asyncio.Lock
+        ] = weakref.WeakValueDictionary()
         self._global_last_run_at: Optional[datetime] = None
         self._global_last_finish_at: Optional[datetime] = None
 
     @property
     def lock(self) -> asyncio.Lock:
         return self._lock
+
+    @asynccontextmanager
+    async def submission_lock(self, run_key: str):
+        """Serialize submission transitions without blocking producer cleanup."""
+        async with self._lock:
+            lock = self._submission_locks.get(run_key)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._submission_locks[run_key] = lock
+        async with lock:
+            yield
 
     async def get_status(self, run_key: str) -> str:
         """Return ``'idle'`` or ``'running'``."""
@@ -136,8 +151,7 @@ class TaskTracker:
             return {
                 run_key: state.task
                 for run_key, state in self._runs.items()
-                if not state.task.done()
-                and (owner is None or state.owner is owner)
+                if not state.task.done() and (owner is None or state.owner is owner)
             }
 
     async def wait_tasks_done(
@@ -197,10 +211,7 @@ class TaskTracker:
             state = self._runs.get(run_key)
             if state is None or state.task.done():
                 return None
-            if (
-                state.access_scope is not None
-                and state.access_scope != access_scope
-            ):
+            if state.access_scope is not None and state.access_scope != access_scope:
                 logger.warning(
                     "Rejected cross-scope stream attach: run_key=%s",
                     run_key,
@@ -259,7 +270,21 @@ class TaskTracker:
             await task
         except asyncio.CancelledError:
             pass
+        finally:
+            # A task cancelled before its first tick never enters _producer's
+            # finally block. Close subscribers and remove that admission too.
+            async with self._lock:
+                if self._runs.get(run_key) is state and task.done():
+                    self._runs.pop(run_key, None)
+                    state.finish_time = datetime.now(timezone.utc)
+                    for queue in state.queues:
+                        queue.put_nowait(_SENTINEL)
         return True
+
+    async def get_run_id(self, run_key: str) -> str | None:
+        async with self._lock:
+            state = self._runs.get(run_key)
+            return state.run_id if state is not None and not state.task.done() else None
 
     async def attach_or_start(
         self,
@@ -297,6 +322,9 @@ class TaskTracker:
                 buffer=[],
                 owner=owner,
                 access_scope=access_scope,
+                run_id=str(payload.get("_qwenpaw_run_id") or "")
+                if isinstance(payload, dict)
+                else None,
             )
             self._runs[run_key] = run
 
@@ -329,8 +357,7 @@ class TaskTracker:
                 except Exception:
                     logger.exception("run error run_key=%s", run_key)
                     err_sse = (
-                        "data: "
-                        f"{json.dumps({'error': 'internal server error'})}\n\n"
+                        "data: " f"{json.dumps({'error': 'internal server error'})}\n\n"
                     )
                     tracker = tracker_ref()
                     if tracker is not None:

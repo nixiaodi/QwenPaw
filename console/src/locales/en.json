@@ -3349,6 +3349,14 @@
     "system": "System"
   },
   "chat": {
+    "editMessage": "Edit message",
+    "editResend": "Resend",
+    "editFailed": "The edit failed. Your draft has been kept; please retry.",
+    "editRunUnavailable": "This resend was interrupted and cannot resume automatically. Your draft is kept; refresh the conversation and edit again.",
+    "editConflict": "The latest message changed. Refresh the conversation before editing.",
+    "editNotReady": "The message is still being saved. Please try again shortly.",
+    "editAttachmentsRetained": "The original attachments will be sent with the edited message.",
+    "editContextUnavailable": "This older turn's context cannot be safely restored. Your draft is kept; send a new message before editing again.",
     "historicalReadOnlyNotice": "Access to this Agent was revoked. Your existing conversations remain read-only.",
     "historicalReadOnlyPlaceholder": "History only: new chats and messages are disabled",
     "sharedReadOnlyNotice": "This read-only conversation was shared by {{owner}}. You can inspect the full history but cannot modify or continue it.",
@@ -3419,6 +3427,7 @@
       }
     },
     "attachments": {
+      "upload": "Upload attachments",
       "tooltip": "Supports documents, images, videos, audio and more formats",
       "tooltipImageOnly": "Current model supports image upload only",
       "tooltipNoMultimodal": "No multimodal capability detected for current model, images or videos may not be processed correctly",

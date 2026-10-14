@@ -12,6 +12,7 @@ import shutil
 
 from pathlib import Path, PurePosixPath
 from typing import Union, Sequence
+from uuid import UUID
 
 from qwenpaw.exceptions import ConfigurationException
 from ...exceptions import AgentStateError
@@ -190,9 +191,7 @@ def _rewrite_weixin_in_session_filename(name: str) -> str | None:
     if idx >= 0:
         safe_uid = stem[:idx]
         safe_sid_tail = stem[idx + len(delim) :]
-        return (
-            f"{safe_uid}_{_CANONICAL_WECHAT_SAFE_PREFIX}{safe_sid_tail}.json"
-        )
+        return f"{safe_uid}_{_CANONICAL_WECHAT_SAFE_PREFIX}{safe_sid_tail}.json"
     if stem.startswith(_LEGACY_WEIXIN_SAFE_PREFIX):
         return (
             _CANONICAL_WECHAT_SAFE_PREFIX
@@ -280,6 +279,7 @@ class SafeJSONSession:
         session_id: str,
         user_id: str = "",
         channel: str = "",
+        run_id: str | None = None,
         **state_modules_mapping,
     ) -> None:
         """Save state modules to a JSON file using async I/O."""
@@ -294,6 +294,15 @@ class SafeJSONSession:
             channel,
         )
         async with get_path_lock(session_save_path):
+            if run_id is not None:
+                marker = self._turn_directory(session_save_path) / "current.json"
+                try:
+                    current = await run_sync_io(_read_session_json, str(marker))
+                except FileNotFoundError:
+                    current = {}
+                if current.get("run_id") not in {None, run_id}:
+                    logger.info("Skipped superseded run save (run=%s)", run_id)
+                    return
             await write_json_atomic_async(
                 session_save_path,
                 state_dicts,
@@ -304,6 +313,96 @@ class SafeJSONSession:
             "Saved session state to %s successfully.",
             session_save_path,
         )
+
+    @staticmethod
+    def _turn_directory(session_path: str) -> Path:
+        path = Path(session_path)
+        return path.parent / ".turns" / path.name
+
+    async def begin_turn(
+        self,
+        session_id: str,
+        user_id: str = "",
+        channel: str = "",
+        *,
+        run_id: str,
+        history_cursor: dict | None = None,
+    ) -> dict:
+        """Capture the pre-input state and fence saves from previous runs."""
+        run_id = str(UUID(run_id))
+        path = await run_sync_io(self._get_save_path, session_id, user_id, channel)
+        directory = self._turn_directory(path)
+        async with get_path_lock(path):
+            await run_sync_io(directory.mkdir, parents=True, exist_ok=True)
+            snapshot_path = directory / f"{run_id}.json"
+            try:
+                snapshot = await run_sync_io(_read_session_json, str(snapshot_path))
+            except FileNotFoundError:
+                try:
+                    state = await run_sync_io(_read_session_json, path)
+                except FileNotFoundError:
+                    state = {}
+                snapshot = {"state": state, "history_cursor": history_cursor}
+                await write_json_atomic_async(str(snapshot_path), snapshot)
+            await write_json_atomic_async(
+                str(directory / "current.json"), {"run_id": run_id}
+            )
+            return snapshot
+
+    async def get_turn_snapshot(
+        self,
+        session_id: str,
+        user_id: str = "",
+        channel: str = "",
+        *,
+        run_id: str,
+    ) -> dict:
+        path = await run_sync_io(self._get_save_path, session_id, user_id, channel)
+        target = self._turn_directory(path) / f"{UUID(run_id)}.json"
+        return await run_sync_io(_read_session_json, str(target))
+
+    async def seed_turn_snapshot(
+        self,
+        session_id: str,
+        user_id: str = "",
+        channel: str = "",
+        *,
+        run_id: str,
+        snapshot: dict,
+    ) -> None:
+        """Install a validated legacy boundary without changing live state."""
+        path = await run_sync_io(self._get_save_path, session_id, user_id, channel)
+        directory = self._turn_directory(path)
+        async with get_path_lock(path):
+            await run_sync_io(directory.mkdir, parents=True, exist_ok=True)
+            await write_json_atomic_async(
+                str(directory / f"{UUID(run_id)}.json"), snapshot
+            )
+
+    async def restore_turn(
+        self,
+        session_id: str,
+        user_id: str = "",
+        channel: str = "",
+        *,
+        source_run_id: str,
+        run_id: str,
+    ) -> dict:
+        """Restore only conversation state; workspace files are untouched."""
+        run_id = str(UUID(run_id))
+        path = await run_sync_io(self._get_save_path, session_id, user_id, channel)
+        directory = self._turn_directory(path)
+        async with get_path_lock(path):
+            snapshot = await run_sync_io(
+                _read_session_json,
+                str(directory / f"{UUID(source_run_id)}.json"),
+            )
+            await write_json_atomic_async(
+                str(directory / "current.json"), {"run_id": run_id}
+            )
+            await write_json_atomic_async(path, snapshot["state"])
+            await write_json_atomic_async(str(directory / f"{run_id}.json"), snapshot)
+            return snapshot
 
     async def load_session_state(
         self,
@@ -385,8 +484,7 @@ class SafeJSONSession:
                     raise AgentStateError(
                         session_id=session_id,
                         message=(
-                            f"Session file {session_save_path}"
-                            f" does not exist"
+                            f"Session file {session_save_path}" f" does not exist"
                         ),
                     ) from exc
                 states = {}

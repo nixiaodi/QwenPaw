@@ -331,12 +331,17 @@ class Runtime:
             request = ctx.request
             user_id = getattr(request, "user_id", "") or ctx.session_id
             channel = getattr(request, "channel", "") or ""
+            request_context = getattr(request, "request_context", None) or {}
+            save_options = {}
+            if isinstance(request_context, dict) and request_context.get("run_id"):
+                save_options["run_id"] = request_context["run_id"]
             await asyncio.shield(
                 session.save_session_state(
                     session_id=ctx.session_id,
                     user_id=user_id,
                     channel=channel,
                     agent=proxy,
+                    **save_options,
                 ),
             )
             logger.info(

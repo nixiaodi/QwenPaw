@@ -67,6 +67,8 @@ async def _load_postgres_history_messages(
     records = await repository.with_user(user_id).list_messages(conversation_id)
     projected: list[Message] = []
     for record in records:
+        if record.status == "superseded":
+            continue
         try:
             stored_content = record.content
             if isinstance(stored_content.get("qwenpaw_payload_ref"), dict):
@@ -76,6 +78,16 @@ async def _load_postgres_history_messages(
                     raise RuntimeError("chat_event_payload_loader_unavailable")
                 stored_content = await loader(stored_content)
             if record.message_type == "legacy_snapshot":
+                if record.role == "user":
+                    from .user_content import user_content_parts
+                    projected.append(Message.model_validate({
+                        "id": str(record.id), "type": "message", "role": "user",
+                        "status": record.status, "content": user_content_parts(record),
+                        "metadata": {"timestamp": record.created_at.isoformat(),
+                                     "metadata": record.content.get("metadata") or {},
+                                     "qwenpaw_editable": True},
+                    }))
+                    continue
                 projected.extend(
                     agentscope_msg_to_message(Msg.model_validate(stored_content))
                 )
@@ -87,6 +99,8 @@ async def _load_postgres_history_messages(
                 "status": record.status,
                 **stored_content,
             }
+            if record.role == "user":
+                payload["metadata"] = {**(payload.get("metadata") or {}), "qwenpaw_editable": True}
             projected.append(Message.model_validate(payload))
         except Exception as exc:
             logger.error(

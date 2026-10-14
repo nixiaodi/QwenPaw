@@ -34,9 +34,13 @@ class ErrorNormalizeHook(LifecycleHook):
             if ctx.agent is not None:
                 _m = getattr(ctx.agent, "model", None)
                 if _m is not None:
-                    model_name = getattr(_m, "model_name", None) or getattr(
-                        _m,
-                        "name",
+                    model_name = next(
+                        (
+                            value
+                            for key in ("model", "model_name", "name")
+                            if isinstance(value := getattr(_m, key, None), str)
+                            and value
+                        ),
                         None,
                     )
         except Exception:
@@ -66,8 +70,7 @@ class ErrorNormalizeHook(LifecycleHook):
 
         ctx.extras["_error_text"] = error_text
         ctx.extras["_error_code"] = (
-            getattr(normalized, "error_code", None)
-            or normalized.__class__.__name__
+            getattr(normalized, "error_code", None) or normalized.__class__.__name__
         )
         return HookResult()
 

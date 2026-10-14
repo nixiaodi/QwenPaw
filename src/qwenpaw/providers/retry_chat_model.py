@@ -28,10 +28,12 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
+from copy import copy, deepcopy
 from typing import Any, AsyncGenerator
 
 from agentscope.model import ChatModelBase
 from agentscope.model._model_response import ChatResponse
+from agentscope.message import ToolCallBlock
 from qwenpaw.exceptions import (
     RateLimitExceededException,
 )
@@ -51,6 +53,21 @@ from .model_capability_cache import get_capability_cache
 from .rate_limiter import LLMRateLimiter, get_rate_limiter
 
 logger = logging.getLogger(__name__)
+
+
+def _copy_stream_chunk(chunk: ChatResponse) -> ChatResponse:
+    # SDK DictMixin raises KeyError for deepcopy's optional protocol methods.
+    # Keep its response type and scalar fields while isolating mutable payloads.
+    if not isinstance(chunk, ChatResponse):
+        return deepcopy(chunk)
+    buffered = copy(chunk)
+    buffered.content = deepcopy(chunk.content)
+    buffered.metadata = deepcopy(chunk.metadata)
+    if chunk.usage is not None:
+        buffered.usage = copy(chunk.usage)
+        buffered.usage.metadata = deepcopy(chunk.usage.metadata)
+    return buffered
+
 
 RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504, 529}
 
@@ -153,18 +170,38 @@ def _get_httpx_retryable() -> tuple[type[Exception], ...]:
     return _httpx_retryable
 
 
+def _is_incomplete_response_stream(exc: Exception) -> bool:
+    """Recognize the SDK error for a gateway stream closed before completion."""
+    if _extract_status_code(exc) is not None:
+        return False
+    try:
+        import openai
+    except ImportError:
+        return False
+    return isinstance(exc, openai.APIError) and any(
+        marker in str(exc).lower()
+        for marker in (
+            "stream disconnected before completion",
+            "stream closed before response.completed",
+        )
+    )
+
+
 def _is_retryable(exc: Exception) -> bool:
     """Return *True* if *exc* should trigger a retry."""
     retryable = (
-        _get_openai_retryable()
-        + _get_anthropic_retryable()
-        + _get_httpx_retryable()
+        _get_openai_retryable() + _get_anthropic_retryable() + _get_httpx_retryable()
     )
     if retryable and isinstance(exc, retryable):
         return True
 
     status = _extract_status_code(exc)
     if status is not None and status in RETRYABLE_STATUS_CODES:
+        return True
+
+    # Gateways can report an incomplete Responses stream inside HTTP 200.
+    # The SDK raises a base APIError, without a retryable HTTP status.
+    if status is None and _is_incomplete_response_stream(exc):
         return True
 
     return False
@@ -374,8 +411,7 @@ class RetryChatModel(ChatModelBase):
         super().__init__(
             credential=getattr(inner, "credential", None),
             model=getattr(inner, "model", "unknown"),
-            parameters=getattr(inner, "parameters", None)
-            or ChatModelBase.Parameters(),
+            parameters=getattr(inner, "parameters", None) or ChatModelBase.Parameters(),
             stream=getattr(inner, "stream", True),
             context_size=getattr(inner, "context_size", 32768),
         )
@@ -495,9 +531,7 @@ class RetryChatModel(ChatModelBase):
             jitter_range=self._rate_limit_config.jitter_range,
         )
 
-        retries = (
-            self._retry_config.max_retries if self._retry_config.enabled else 0
-        )
+        retries = self._retry_config.max_retries if self._retry_config.enabled else 0
         attempts = retries + 1
         last_exc: Exception | None = None
 
@@ -580,8 +614,7 @@ class RetryChatModel(ChatModelBase):
 
                 delay = _compute_backoff(attempt, self._retry_config)
                 logger.warning(
-                    "LLM call failed (attempt %d/%d): %s. "
-                    "Retrying in %.1fs ...",
+                    "LLM call failed (attempt %d/%d): %s. " "Retrying in %.1fs ...",
                     attempt,
                     attempts,
                     exc,
@@ -619,15 +652,34 @@ class RetryChatModel(ChatModelBase):
         pending_stream: AsyncGenerator[ChatResponse, None] | None = stream
         pending_acquired_at = acquired_at
         reasoning_injected = False
+        output_emitted = False
 
         while True:
             try:
                 if pending_stream is not None:
+                    tool_chunks = []
                     async for chunk in self._consume_stream_with_slot(
                         pending_stream,
                         limiter,
                         pending_acquired_at,
                     ):
+                        content = getattr(chunk, "content", None)
+                        if tool_chunks or (
+                            isinstance(content, list)
+                            and any(
+                                isinstance(block, ToolCallBlock) for block in content
+                            )
+                        ):
+                            # Tool arguments are provisional until the model
+                            # response completes. Keep failed attempt IDs and
+                            # fragments out of the agent and event envelope.
+                            tool_chunks.append(_copy_stream_chunk(chunk))
+                            continue
+                        output_emitted = output_emitted or bool(
+                            getattr(chunk, "content", None)
+                        )
+                        yield chunk
+                    for chunk in tool_chunks:
                         yield chunk
                     return  # stream completed without error
 
@@ -648,9 +700,7 @@ class RetryChatModel(ChatModelBase):
                                 self._rate_limit_config.acquire_timeout,
                             ),
                             details={
-                                "reason": (
-                                    "Timed out waiting for execution slot"
-                                ),
+                                "reason": ("Timed out waiting for execution slot"),
                             },
                         ) from exc
 
@@ -670,6 +720,11 @@ class RetryChatModel(ChatModelBase):
 
             except Exception as retry_exc:
                 pending_stream = None
+                # Replaying after visible deltas would concatenate different
+                # attempts and leave failed tool fragments in the SDK events.
+                # Recover this gateway EOF only before any content is yielded.
+                if output_emitted and _is_incomplete_response_stream(retry_exc):
+                    raise
                 if (
                     not reasoning_injected
                     and _is_missing_reasoning_content_error(retry_exc)
@@ -702,8 +757,7 @@ class RetryChatModel(ChatModelBase):
 
                 retry_delay = _compute_backoff(attempt, self._retry_config)
                 logger.warning(
-                    "LLM stream failed (attempt %d/%d): %s. "
-                    "Retrying in %.1fs ...",
+                    "LLM stream failed (attempt %d/%d): %s. " "Retrying in %.1fs ...",
                     attempt,
                     max_attempts,
                     retry_exc,

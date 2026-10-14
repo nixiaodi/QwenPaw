@@ -165,13 +165,16 @@ async def _resolve_console_runtime_project(
             from ...agents.fork_project import resolve_allowed_fork_project_dir
 
             selected = resolve_allowed_fork_project_dir(
-                str(selected), workspace_dir=workspace.workspace_dir,
+                str(selected),
+                workspace_dir=workspace.workspace_dir,
                 coding_project_dir=allowed_root,
             )
         elif not selected.is_relative_to(allowed_root):
             selected = None
         if selected is None:
-            raise HTTPException(status_code=403, detail="Project directory is outside authorized scope")
+            raise HTTPException(
+                status_code=403, detail="Project directory is outside authorized scope"
+            )
         return selected, project_source
     path = await run_sync_io(
         resolve_private_task_directory,
@@ -188,12 +191,14 @@ async def _bind_console_task_output(request, workspace, chat, request_context):
         return
     from ...services.workspace_files import resolve_private_task_directory
 
-    request_context["task_output_dir"] = str(await run_sync_io(
-        resolve_private_task_directory,
-        actor_user_id=get_actor(request).user_id,
-        agent_id=workspace.agent_id,
-        conversation_id=str(chat.id),
-    ))
+    request_context["task_output_dir"] = str(
+        await run_sync_io(
+            resolve_private_task_directory,
+            actor_user_id=get_actor(request).user_id,
+            agent_id=workspace.agent_id,
+            conversation_id=str(chat.id),
+        )
+    )
     request_context["agent_id"] = workspace.agent_id
     request_context["workspace_dir"] = str(workspace.workspace_dir)
     request_context.pop("active_mode_project_dir", None)
@@ -219,7 +224,8 @@ async def _resolve_console_upload_dir(
     from ..attachments.service import resolve_attachment_runtime_root
 
     root = await resolve_attachment_runtime_root(
-        user_id=actor.user_id, agent_key=workspace.agent_id,
+        user_id=actor.user_id,
+        agent_key=workspace.agent_id,
     )
     return root / "media"
 
@@ -730,10 +736,7 @@ def _with_personal_library_retrieval_trace(stream_fn):
                 },
                 ensure_ascii=False,
             )
-            output = (
-                f"自动检索命中 {len(names)} 份个人知识库资料："
-                + "、".join(names)
-            )
+            output = f"自动检索命中 {len(names)} 份个人知识库资料：" + "、".join(names)
 
             def content(data: dict[str, Any]) -> list[dict[str, Any]]:
                 return [
@@ -853,7 +856,25 @@ async def post_console_chat(
     Stop via POST /console/chat/stop. Reconnect with body.reconnect=true.
     """
     is_reconnect = _is_reconnect_request(request_data)
+    raw_edit = (
+        request_data.get("edit_last_message")
+        if isinstance(request_data, dict)
+        else getattr(request_data, "edit_last_message", None)
+    )
+    edit = None
+    if raw_edit is not None:
+        from ..chats.turn_edit import TurnEditRequest
+        from pydantic import ValidationError
+
+        try:
+            edit = TurnEditRequest.model_validate(raw_edit)
+        except ValidationError as exc:
+            raise HTTPException(400, "invalid_edit_request") from exc
+        if is_reconnect:
+            raise HTTPException(400, "edit_cannot_reconnect")
     requested_conversation_id = _requested_conversation_id(request_data)
+    if edit is not None and not requested_conversation_id:
+        raise HTTPException(400, "conversation_id is required for edit")
     if is_multi_user_enabled() and is_reconnect and not requested_conversation_id:
         raise HTTPException(
             status_code=400,
@@ -899,6 +920,21 @@ async def post_console_chat(
         channel_id=native_payload["channel_id"],
         name=name,
     )
+    editor = None
+    if edit is not None:
+        from ..chats.turn_edit import LatestTurnEditor
+        from ..chats.repo import RepositoryConflictError
+
+        try:
+            editor = LatestTurnEditor(workspace, chat)
+            await editor.preserve_input(edit, native_payload)
+            native_payload["content_parts"] = [
+                _coerce_content_item(part) for part in native_payload["content_parts"]
+            ]
+        except RepositoryConflictError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
     if not is_reconnect:
         from ...models.runtime import prepare_console_model
 
@@ -960,7 +996,9 @@ async def post_console_chat(
             project_dir=project_dir,
             project_source=project_source,
             conversation_id=str(chat.id),
-            authorized_project_dir=Path(agent_config.project_dir or workspace.workspace_dir),
+            authorized_project_dir=Path(
+                agent_config.project_dir or workspace.workspace_dir
+            ),
         )
         request_context = dict(
             native_payload["meta"].get("request_context") or {},
@@ -986,13 +1024,28 @@ async def post_console_chat(
             _with_personal_library_retrieval_trace(console_channel.stream_one),
         )
         try:
-            queue, _ = await tracker.attach_or_start(
-                chat.id,
-                native_payload,
-                stream_source,
-                owner=workspace,
+            queue = await _admit_console_submission(
+                workspace=workspace,
+                chat=chat,
+                payload=native_payload,
+                stream_source=stream_source,
                 access_scope=access_scope,
+                config=agent_config,
+                editor=editor,
+                edit=edit,
             )
+            if queue is None:
+                return StreamingResponse(
+                    editor.replay(edit),
+                    media_type="text/event-stream",
+                    headers={
+                        "Cache-Control": "no-cache",
+                        "X-QwenPaw-Chat-Id": chat.id,
+                        "X-QwenPaw-Edit-Replay": "true",
+                        "X-QwenPaw-Can-Edit": "true",
+                        "Access-Control-Expose-Headers": "X-QwenPaw-Chat-Id, X-QwenPaw-Can-Edit",
+                    },
+                )
         except PermissionError as exc:
             raise HTTPException(
                 status_code=404,
@@ -1020,9 +1073,68 @@ async def post_console_chat(
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
             "X-QwenPaw-Chat-Id": chat.id,
-            "Access-Control-Expose-Headers": "X-QwenPaw-Chat-Id",
+            "X-QwenPaw-Can-Edit": "true"
+            if getattr(workspace.chat_manager, "run_persistence", None) is not None
+            else "false",
+            "Access-Control-Expose-Headers": "X-QwenPaw-Chat-Id, X-QwenPaw-Can-Edit",
         },
     )
+
+
+async def _admit_console_submission(
+    *,
+    workspace,
+    chat,
+    payload,
+    stream_source,
+    access_scope,
+    config,
+    editor=None,
+    edit=None,
+):
+    """Keep stop/revision/start in one per-conversation admission transition."""
+    from ..chats.repo import RepositoryConflictError
+    from ..chats.turn_edit import capture_console_turn
+
+    tracker = workspace.task_tracker
+    # Older integrations provide a reduced tracker, without revision support.
+    from contextlib import nullcontext
+
+    gate = (
+        tracker.submission_lock(chat.id)
+        if hasattr(tracker, "submission_lock")
+        else nullcontext()
+    )
+    async with gate:
+        if editor is not None:
+            try:
+                action = await editor.prepare(edit, payload, config)
+            except RepositoryConflictError as exc:
+                raise HTTPException(409, str(exc)) from exc
+            except ValueError as exc:
+                raise HTTPException(409, str(exc)) from exc
+            if action == "complete":
+                return None
+            if action == "attach":
+                return await tracker.attach(chat.id, access_scope=access_scope)
+        elif (
+            not hasattr(tracker, "get_status")
+            or await tracker.get_status(chat.id) != "running"
+        ):
+            await capture_console_turn(
+                workspace, chat, payload["_qwenpaw_run_id"], config
+            )
+            persistence = getattr(workspace.chat_manager, "run_persistence", None)
+            if persistence is not None and hasattr(persistence, "prepare_turn"):
+                await persistence.prepare_turn(chat=chat, payload=payload)
+        queue, _ = await tracker.attach_or_start(
+            chat.id,
+            payload,
+            stream_source,
+            owner=workspace,
+            access_scope=access_scope,
+        )
+        return queue
 
 
 @router.post(
@@ -1070,7 +1182,32 @@ async def post_console_chat_stop(
     logger.debug(
         "[STOP API] Got workspace, calling task_tracker.request_stop...",
     )
-    stopped = await workspace.task_tracker.request_stop(resolved_chat_id)
+    tracker = workspace.task_tracker
+    run_id = (
+        await tracker.get_run_id(resolved_chat_id)
+        if hasattr(tracker, "get_run_id")
+        else None
+    )
+    stopped = await tracker.request_stop(resolved_chat_id)
+    if stopped and run_id and is_multi_user_enabled():
+        actor = get_actor(request)
+        repository = workspace.chat_manager.conversation_repository
+        if repository is not None and actor.user_id is not None:
+            repository = repository.with_user(actor.user_id)
+            pending = await repository.get_run(UUID(run_id))
+            if pending is not None and pending.status in {
+                "queued",
+                "running",
+                "waiting_input",
+                "waiting_approval",
+            }:
+                from datetime import datetime, timezone
+
+                await repository.finish_run(
+                    UUID(run_id),
+                    status="cancelled",
+                    finished_at=datetime.now(timezone.utc),
+                )
 
     logger.debug(
         "[STOP API] task_tracker.request_stop returned: stopped=%s",
@@ -1083,7 +1220,8 @@ async def post_console_chat_stop(
 async def post_console_upload(
     request: Request,
     file: UploadFile = File(..., description="File to attach"),
-    conversation_id: str | None = Query(
+    conversation_id: str
+    | None = Query(
         None,
         description="Existing conversation id receiving this attachment",
     ),
@@ -1585,7 +1723,9 @@ async def post_console_chat_task(  # pylint: disable=too-many-statements
         project_dir=project_dir,
         project_source=project_source,
         conversation_id=str(chat.id),
-        authorized_project_dir=Path(agent_config.project_dir or workspace.workspace_dir),
+        authorized_project_dir=Path(
+            agent_config.project_dir or workspace.workspace_dir
+        ),
     )
     run_id = str(uuid.uuid4())
     request_context = _bind_run_context(

@@ -15,6 +15,7 @@
  * a message-renderer seam. If their paths change, update the imports below.
  */
 import React, { useMemo } from "react";
+import DeferredToolOutput from "./DeferredToolOutput";
 import RequestActions from "@agentscope-ai/chat/lib/AgentScopeRuntimeWebUI/core/AgentScopeRuntime/Request/Actions";
 import { TranscriptText } from "./TranscriptText";
 import { LatestMessageEditor } from "./components/LatestMessageEditor";
@@ -187,7 +188,7 @@ function DefaultHostResponseCard({
           case AgentScopeRuntimeMessageType.TOOL_CALL_OUTPUT:
           case AgentScopeRuntimeMessageType.MCP_CALL:
           case AgentScopeRuntimeMessageType.MCP_CALL_OUTPUT:
-            return <ResponseTool key={itemKey} data={item} />;
+            return <DeferredToolOutput key={itemKey} data={item} />;
           case AgentScopeRuntimeMessageType.MCP_APPROVAL_REQUEST:
             return <ResponseTool key={itemKey} data={item} isApproval={!readOnly} />;
           case AgentScopeRuntimeMessageType.REASONING:

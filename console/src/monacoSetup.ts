@@ -12,7 +12,8 @@
  *      never touches the CDN.
  *
  * This module has side effects and must be imported once, before any Monaco
- * editor mounts (see main.tsx).
+ * editor mounts (see pages/Coding/TabbedEditor.tsx). Keep it in the editor's
+ * lazy module so the application entrypoint does not load Monaco.
  */
 
 import * as monaco from "monaco-editor";

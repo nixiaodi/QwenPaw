@@ -30,6 +30,7 @@ import { DesktopUpdateProvider } from "./contexts/DesktopUpdateContext";
 import { UpdateTakeoverGate } from "./components/UpdateTakeoverPage";
 import { Suspense, lazy } from "react";
 import { lazyImportWithRetry } from "./utils/lazyWithRetry";
+import LoadingStatus from "./components/LoadingStatus";
 import {
   getLoginHref,
   getLoginPath,
@@ -88,7 +89,7 @@ function AuthGuard({
     if (phase === "loading") void bootstrap();
   }, [bootstrap, phase]);
 
-  if (phase === "loading") return null;
+  if (phase === "loading") return <LoadingStatus />;
   if (phase === "anonymous") {
     const loginTo = getLoginPath(window.location);
     if (useHardRedirect) {
@@ -183,7 +184,7 @@ function AppInner() {
 
   // Wait for plugins to load before rendering routes that might be patched
   if (pluginsLoading) {
-    return null;
+    return <LoadingStatus />;
   }
 
   const osActive = isOsPath(window.location.pathname);
@@ -193,7 +194,7 @@ function AppInner() {
   // <Router> inside another. The classic browser layout keeps its BrowserRouter.
   const routedContent = osActive ? (
     <AuthGuard useHardRedirect>
-      <Suspense fallback={null}>
+      <Suspense fallback={<LoadingStatus />}>
         <DesktopOSPage />
       </Suspense>
     </AuthGuard>
@@ -203,7 +204,7 @@ function AppInner() {
         <Route
           path="/login"
           element={
-            <Suspense fallback={null}>
+            <Suspense fallback={<LoadingStatus />}>
               <LoginPage />
             </Suspense>
           }

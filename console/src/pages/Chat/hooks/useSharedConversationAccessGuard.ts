@@ -41,7 +41,7 @@ export function useSharedConversationAccessGuard({
       if (disposed || checking || revoked) return;
       checking = true;
       try {
-        await chatApi.getChat(conversationId);
+        await chatApi.getChatSummary(conversationId);
       } catch (error) {
         if (!disposed && isConversationUnavailable(error)) {
           revoked = true;

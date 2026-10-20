@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Alert,
   Button,
@@ -234,15 +234,33 @@ function Transcript({
   const [historyMessages, setHistoryMessages] = useState<Message[]>([]);
   const [showRaw, setShowRaw] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [loadingEarlier, setLoadingEarlier] = useState(false);
+  const [rawLoading, setRawLoading] = useState(false);
+  const [rawLoaded, setRawLoaded] = useState(false);
+  const [cursor, setCursor] = useState<number | null>(null);
+  const [rawCursor, setRawCursor] = useState<number | null>(null);
   const [error, setError] = useState("");
+  const lifetime = useRef(new AbortController());
   useEffect(() => {
     const controller = new AbortController();
+    lifetime.current = controller;
+    setLoading(true);
+    setLoadingEarlier(false);
+    setRawLoading(false);
+    setRawLoaded(false);
+    setMessages([]);
+    setShowRaw(false);
+    setRawCursor(null);
+    setCursor(null);
+    setError("");
     void agentsApi
-      .getAdminConversation(agentId, conversation.id, controller.signal)
+      .getAdminConversation(agentId, conversation.id, controller.signal, {
+        pageSize: 5,
+      })
       .then((result) => {
         if (!controller.signal.aborted) {
-          setMessages(result.messages);
           setHistoryMessages(result.history_messages);
+          setCursor(result.has_more ? result.next_before ?? null : null);
         }
       })
       .catch(() => {
@@ -253,6 +271,63 @@ function Transcript({
       });
     return () => controller.abort();
   }, [agentId, conversation.id, t]);
+
+  const loadEarlier = async () => {
+    if (loadingEarlier || cursor === null) return;
+    const signal = lifetime.current.signal;
+    setLoadingEarlier(true);
+    setError("");
+    try {
+      const result = await agentsApi.getAdminConversation(
+        agentId,
+        conversation.id,
+        signal,
+        { pageSize: 5, beforeSequence: cursor },
+      );
+      if (signal.aborted) return;
+      setHistoryMessages((current) => [
+        ...result.history_messages.filter(
+          (item) => !current.some((existing) => existing.id === item.id),
+        ),
+        ...current,
+      ]);
+      setCursor(result.has_more ? result.next_before ?? null : null);
+    } catch {
+      if (!signal.aborted) setError(t("sessions.viewFailed"));
+    } finally {
+      if (!signal.aborted) setLoadingEarlier(false);
+    }
+  };
+  const loadRaw = async (beforeSequence?: number) => {
+    if (rawLoading) return;
+    const signal = lifetime.current.signal;
+    setRawLoading(true);
+    setError("");
+    try {
+      const result = await agentsApi.getAdminConversation(
+        agentId,
+        conversation.id,
+        signal,
+        { raw: true, ...(beforeSequence != null ? { beforeSequence } : {}) },
+      );
+      if (signal.aborted) return;
+      setMessages((current) =>
+        beforeSequence != null
+          ? [...(result.messages || []), ...current]
+          : result.messages || [],
+      );
+      setRawCursor(result.has_more ? result.next_before ?? null : null);
+      setRawLoaded(true);
+    } catch {
+      if (!signal.aborted) setError(t("sessions.viewFailed"));
+    } finally {
+      if (!signal.aborted) setRawLoading(false);
+    }
+  };
+  const toggleRaw = () => {
+    setShowRaw((value) => !value);
+    if (!showRaw && !rawLoaded) void loadRaw();
+  };
   return (
     <Drawer
       open
@@ -273,7 +348,7 @@ function Transcript({
         },
       }}
       extra={
-        <Button onClick={() => setShowRaw((value) => !value)}>
+        <Button onClick={toggleRaw}>
           {t(showRaw ? "sessions.chatView" : "sessions.rawRecords")}
         </Button>
       }
@@ -291,6 +366,23 @@ function Transcript({
       </div>
       {error && <Alert type="error" message={error} />}
       <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
+        {!loading && !showRaw && cursor !== null && (
+          <div style={{ padding: 12, textAlign: "center" }}>
+            <Button loading={loadingEarlier} onClick={() => void loadEarlier()}>
+              加载更早消息
+            </Button>
+          </div>
+        )}
+        {showRaw && (rawCursor !== null || !rawLoaded) && (
+          <div style={{ padding: 12, textAlign: "center" }}>
+            <Button
+              loading={rawLoading}
+              onClick={() => void loadRaw(rawCursor ?? undefined)}
+            >
+              {rawLoaded ? "加载更早原始记录" : "加载原始记录"}
+            </Button>
+          </div>
+        )}
         {loading ? (
           <div style={{ padding: 64, textAlign: "center" }}>
             <Spin />

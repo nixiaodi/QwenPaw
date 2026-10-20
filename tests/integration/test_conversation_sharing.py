@@ -36,16 +36,24 @@ def _alembic_config(postgres_test_schema) -> Config:
 async def test_owner_shares_only_with_current_agent_eligible_user(
     postgres_test_schema,
 ) -> None:
-    await asyncio.to_thread(command.upgrade, _alembic_config(postgres_test_schema), "head")
+    await asyncio.to_thread(
+        command.upgrade, _alembic_config(postgres_test_schema), "head"
+    )
     schema = postgres_test_schema.name
     engine = create_async_engine(postgres_test_schema.async_url(), poolclass=NullPool)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     owner_id, eligible_id, history_only_id, outsider_id = (uuid4() for _ in range(4))
-    agent_id, conversation_id = uuid4(), uuid4()
+    agent_id, conversation_id, message_id = uuid4(), uuid4(), uuid4()
 
     async with factory.begin() as session:
-        await session.execute(text(f'GRANT USAGE ON SCHEMA "{schema}" TO qwenpaw_runtime'))
-        await session.execute(text(f'GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA "{schema}" TO qwenpaw_runtime'))
+        await session.execute(
+            text(f'GRANT USAGE ON SCHEMA "{schema}" TO qwenpaw_runtime')
+        )
+        await session.execute(
+            text(
+                f'GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA "{schema}" TO qwenpaw_runtime'
+            )
+        )
         for user_id, username in (
             (owner_id, "owner"),
             (eligible_id, "eligible"),
@@ -53,24 +61,42 @@ async def test_owner_shares_only_with_current_agent_eligible_user(
             (outsider_id, "outsider"),
         ):
             await session.execute(
-                text(f'INSERT INTO "{schema}".users (id,username,password_hash,status,platform_role) VALUES (:id,:username,\'x\',\'active\',\'member\')'),
+                text(
+                    f"INSERT INTO \"{schema}\".users (id,username,password_hash,status,platform_role) VALUES (:id,:username,'x','active','member')"
+                ),
                 {"id": user_id, "username": username},
             )
         await session.execute(
-            text(f'INSERT INTO "{schema}".agents (id,owner_user_id,name,status,visibility,default_model_mode,draft_workspace_key) VALUES (:id,:owner,\'Shared Agent\',\'active\',\'shared\',\'inherit\',\'workspaces/shared\')'),
+            text(
+                f"INSERT INTO \"{schema}\".agents (id,owner_user_id,name,status,visibility,default_model_mode,draft_workspace_key) VALUES (:id,:owner,'Shared Agent','active','shared','inherit','workspaces/shared')"
+            ),
             {"id": agent_id, "owner": owner_id},
         )
         await session.execute(
-            text(f'INSERT INTO "{schema}".agent_members (agent_id,user_id,role,granted_by) VALUES (:agent,:user,\'user\',:owner)'),
+            text(
+                f"INSERT INTO \"{schema}\".agent_members (agent_id,user_id,role,granted_by) VALUES (:agent,:user,'user',:owner)"
+            ),
             {"agent": agent_id, "user": eligible_id, "owner": owner_id},
         )
         await session.execute(
-            text(f'INSERT INTO "{schema}".agent_history_access (agent_id,user_id,first_chat_created_at,last_chat_created_at) VALUES (:agent,:user,now(),now())'),
+            text(
+                f'INSERT INTO "{schema}".agent_history_access (agent_id,user_id,first_chat_created_at,last_chat_created_at) VALUES (:agent,:user,now(),now())'
+            ),
             {"agent": agent_id, "user": history_only_id},
         )
         await session.execute(
-            text(f'INSERT INTO "{schema}".conversations (id,agent_id,owner_user_id,title,status) VALUES (:id,:agent,:owner,\'Share me\',\'active\')'),
+            text(
+                f"INSERT INTO \"{schema}\".conversations (id,agent_id,owner_user_id,title,status) VALUES (:id,:agent,:owner,'Share me','active')"
+            ),
             {"id": conversation_id, "agent": agent_id, "owner": owner_id},
+        )
+        await session.execute(
+            text(
+                f'INSERT INTO "{schema}".messages '
+                "(id,conversation_id,sequence,role,message_type,content,status,created_by) "
+                "VALUES (:id,:conversation,1,'tool','plugin_call_output','{}','completed',:owner)"
+            ),
+            {"id": message_id, "conversation": conversation_id, "owner": owner_id},
         )
 
     @asynccontextmanager
@@ -79,7 +105,9 @@ async def test_owner_shares_only_with_current_agent_eligible_user(
             await session.execute(text("SET LOCAL ROLE qwenpaw_runtime"))
             yield session
 
-    repository = PostgresConversationRepository(schema=schema, session_factory=runtime_session_factory)
+    repository = PostgresConversationRepository(
+        schema=schema, session_factory=runtime_session_factory
+    )
     owner_repo = repository.with_user(owner_id)
     try:
         candidates = await owner_repo.list_share_candidates(
@@ -99,10 +127,13 @@ async def test_owner_shares_only_with_current_agent_eligible_user(
             granted_by=owner_id,
         )
         assert first.user_id == second.user_id == eligible_id
-        assert [member.user_id for member in await owner_repo.list_members(
-            conversation_id=conversation_id,
-            owner_user_id=owner_id,
-        )] == [eligible_id]
+        assert [
+            member.user_id
+            for member in await owner_repo.list_members(
+                conversation_id=conversation_id,
+                owner_user_id=owner_id,
+            )
+        ] == [eligible_id]
 
         viewer_access = await repository.with_user(
             eligible_id
@@ -114,6 +145,21 @@ async def test_owner_shares_only_with_current_agent_eligible_user(
         assert viewer_access.access_role == "viewer"
         assert viewer_access.read_only is True
         assert viewer_access.shared_by_username == "owner"
+        viewer_repo = repository.with_user(eligible_id)
+        outsider_repo = repository.with_user(outsider_id)
+        assert await viewer_repo.has_messages(conversation_id)
+        assert (
+            len((await viewer_repo.list_history_page(conversation_id, page_size=5))[0])
+            == 1
+        )
+        assert await viewer_repo.get_message(conversation_id, message_id) is not None
+        assert not await outsider_repo.has_messages(conversation_id)
+        assert await outsider_repo.list_history_page(conversation_id, page_size=5) == (
+            [],
+            False,
+            None,
+        )
+        assert await outsider_repo.get_message(conversation_id, message_id) is None
 
         async with factory.begin() as session:
             await session.execute(
@@ -124,18 +170,22 @@ async def test_owner_shares_only_with_current_agent_eligible_user(
                 {"agent": agent_id, "user": eligible_id},
             )
 
-        assert await repository.with_user(
-            eligible_id
-        ).get_conversation_for_user(
-            conversation_id=conversation_id,
-            user_id=eligible_id,
-        ) is None
-        assert await repository.with_user(
-            eligible_id
-        ).list_conversations_for_user(
-            user_id=eligible_id,
-            scope="shared",
-        ) == []
+        assert (
+            await repository.with_user(eligible_id).get_conversation_for_user(
+                conversation_id=conversation_id,
+                user_id=eligible_id,
+            )
+            is None
+        )
+        assert not await viewer_repo.has_messages(conversation_id)
+        assert await viewer_repo.get_message(conversation_id, message_id) is None
+        assert (
+            await repository.with_user(eligible_id).list_conversations_for_user(
+                user_id=eligible_id,
+                scope="shared",
+            )
+            == []
+        )
 
         async with factory.begin() as session:
             await session.execute(
@@ -146,9 +196,7 @@ async def test_owner_shares_only_with_current_agent_eligible_user(
                 {"agent": agent_id, "user": eligible_id},
             )
 
-        restored = await repository.with_user(
-            eligible_id
-        ).get_conversation_for_user(
+        restored = await repository.with_user(eligible_id).get_conversation_for_user(
             conversation_id=conversation_id,
             user_id=eligible_id,
         )
@@ -156,12 +204,13 @@ async def test_owner_shares_only_with_current_agent_eligible_user(
         assert restored.access_role == "viewer"
         assert restored.read_only is True
 
-        assert await repository.with_user(
-            outsider_id
-        ).get_conversation_for_user(
-            conversation_id=conversation_id,
-            user_id=outsider_id,
-        ) is None
+        assert (
+            await repository.with_user(outsider_id).get_conversation_for_user(
+                conversation_id=conversation_id,
+                user_id=outsider_id,
+            )
+            is None
+        )
 
         with pytest.raises(ConversationShareEligibilityError):
             await owner_repo.add_viewer(
@@ -172,7 +221,9 @@ async def test_owner_shares_only_with_current_agent_eligible_user(
 
         async with factory.begin() as session:
             member_count = await session.scalar(
-                text(f'SELECT count(*) FROM "{schema}".agent_members WHERE agent_id=:agent AND user_id=:user'),
+                text(
+                    f'SELECT count(*) FROM "{schema}".agent_members WHERE agent_id=:agent AND user_id=:user'
+                ),
                 {"agent": agent_id, "user": eligible_id},
             )
             assert member_count == 1
@@ -182,18 +233,20 @@ async def test_owner_shares_only_with_current_agent_eligible_user(
             user_id=eligible_id,
             owner_user_id=owner_id,
         )
-        assert await repository.with_user(
-            eligible_id
-        ).get_conversation_for_user(
-            conversation_id=conversation_id,
-            user_id=eligible_id,
-        ) is None
-        assert await repository.with_user(
-            eligible_id
-        ).list_conversations_for_user(
-            user_id=eligible_id,
-            scope="shared",
-        ) == []
+        assert (
+            await repository.with_user(eligible_id).get_conversation_for_user(
+                conversation_id=conversation_id,
+                user_id=eligible_id,
+            )
+            is None
+        )
+        assert (
+            await repository.with_user(eligible_id).list_conversations_for_user(
+                user_id=eligible_id,
+                scope="shared",
+            )
+            == []
+        )
         assert not await owner_repo.remove_viewer(
             conversation_id=conversation_id,
             user_id=eligible_id,

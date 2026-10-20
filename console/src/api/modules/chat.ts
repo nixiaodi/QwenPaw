@@ -88,20 +88,46 @@ export const chatApi = {
       ? request<AttachmentListItem[]>(path, options)
       : request<AttachmentListItem[]>(path);
   },
-  saveAttachment: (attachmentId: string, targetPath?: string, context?: AgentRequestContext) =>
-    request<AttachmentListItem>(`/console/attachments/${encodeURIComponent(attachmentId)}/save`, withAgentRequestContext({
-      method: "POST",
-      body: JSON.stringify({ target_path: targetPath ?? null }),
-    }, context)),
-  moveAttachment: (attachmentId: string, targetPath: string, context?: AgentRequestContext) =>
-    request<AttachmentListItem>(`/console/attachments/${encodeURIComponent(attachmentId)}/move`, withAgentRequestContext({
-      method: "POST",
-      body: JSON.stringify({ target_path: targetPath }),
-    }, context)),
+  saveAttachment: (
+    attachmentId: string,
+    targetPath?: string,
+    context?: AgentRequestContext,
+  ) =>
+    request<AttachmentListItem>(
+      `/console/attachments/${encodeURIComponent(attachmentId)}/save`,
+      withAgentRequestContext(
+        {
+          method: "POST",
+          body: JSON.stringify({ target_path: targetPath ?? null }),
+        },
+        context,
+      ),
+    ),
+  moveAttachment: (
+    attachmentId: string,
+    targetPath: string,
+    context?: AgentRequestContext,
+  ) =>
+    request<AttachmentListItem>(
+      `/console/attachments/${encodeURIComponent(attachmentId)}/move`,
+      withAgentRequestContext(
+        {
+          method: "POST",
+          body: JSON.stringify({ target_path: targetPath }),
+        },
+        context,
+      ),
+    ),
   deleteAttachment: (attachmentId: string, context?: AgentRequestContext) =>
-    request<AttachmentListItem>(`/console/attachments/${encodeURIComponent(attachmentId)}`, withAgentRequestContext({
-      method: "DELETE",
-    }, context)),
+    request<AttachmentListItem>(
+      `/console/attachments/${encodeURIComponent(attachmentId)}`,
+      withAgentRequestContext(
+        {
+          method: "DELETE",
+        },
+        context,
+      ),
+    ),
 
   filePreviewUrl: (filename: string): string => {
     if (!filename) return "";
@@ -110,7 +136,7 @@ export const chatApi = {
     if (filename.startsWith("/api/console/attachments/")) {
       return withApiToken(getApiUrl(filename.slice("/api".length)));
     }
-    let cleaned = filename.replace(/^\/+/, "");
+    const cleaned = filename.replace(/^\/+/, "");
     const path = `${FILES_PREVIEW}/${cleaned}`;
     return withApiToken(getApiUrl(path));
   },
@@ -128,10 +154,7 @@ export const chatApi = {
       searchParams.append("archived", String(params.archived));
     if (params?.scope) searchParams.append("scope", params.scope);
     const query = searchParams.toString();
-    const options = withAgentRequestContext(
-      undefined,
-      params?.requestContext,
-    );
+    const options = withAgentRequestContext(undefined, params?.requestContext);
     return options
       ? request<ChatSpec[]>(`/chats${query ? `?${query}` : ""}`, options)
       : request<ChatSpec[]>(`/chats${query ? `?${query}` : ""}`);
@@ -143,24 +166,42 @@ export const chatApi = {
       body: JSON.stringify(chat),
     }),
 
-  getChat: (chatId: string, options?: { signal?: AbortSignal }) =>
-    request<ChatHistory>(`/chats/${encodeURIComponent(chatId)}`, {
-      signal: options?.signal,
-    }),
+  getChatSummary: (chatId: string) =>
+    request<{ has_messages: boolean }>(
+      `/chats/${encodeURIComponent(chatId)}/summary`,
+    ),
+
+  getChat: (
+    chatId: string,
+    options?: {
+      signal?: AbortSignal;
+      pageSize?: number;
+      beforeSequence?: number;
+    },
+  ) =>
+    request<ChatHistory>(
+      `/chats/${encodeURIComponent(chatId)}${
+        options?.pageSize
+          ? `?page_size=${options.pageSize}${
+              options.beforeSequence !== undefined
+                ? `&before_sequence=${options.beforeSequence}`
+                : ""
+            }`
+          : ""
+      }`,
+      {
+        signal: options?.signal,
+      },
+    ),
 
   getChatStatus: (
     chatId: string,
     options?: { signal?: AbortSignal; agentId?: string },
   ) =>
-    request<ChatStatusResponse>(
-      `/chats/${encodeURIComponent(chatId)}/status`,
-      {
-        signal: options?.signal,
-        headers: options?.agentId
-          ? { "X-Agent-Id": options.agentId }
-          : undefined,
-      },
-    ),
+    request<ChatStatusResponse>(`/chats/${encodeURIComponent(chatId)}/status`, {
+      signal: options?.signal,
+      headers: options?.agentId ? { "X-Agent-Id": options.agentId } : undefined,
+    }),
 
   updateChat: (chatId: string, chat: ChatUpdateRequest) =>
     request<ChatSpec>(`/chats/${encodeURIComponent(chatId)}`, {

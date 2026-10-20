@@ -1,7 +1,6 @@
 import { Suspense, useMemo } from "react";
-import { Layout, Spin } from "antd";
+import { Layout } from "antd";
 import { Routes, Route, useLocation, matchPath } from "react-router-dom";
-import { useTranslation } from "react-i18next";
 import Sidebar from "../Sidebar";
 import Header from "../Header";
 import ConsolePollService from "../../components/ConsolePollService";
@@ -12,6 +11,7 @@ import styles from "../index.module.less";
 import { useRoutes } from "../../plugins/registry/hooks";
 import { Slot } from "../../plugins/registry/Slot";
 import CapabilityBoundary from "../../access/CapabilityBoundary";
+import LoadingStatus from "../../components/LoadingStatus";
 
 const { Content } = Layout;
 
@@ -33,7 +33,6 @@ function pickSelectedKey(
 }
 
 export default function MainLayout() {
-  const { t } = useTranslation();
   const location = useLocation();
   const currentPath = location.pathname;
   const routes = useRoutes();
@@ -68,14 +67,7 @@ export default function MainLayout() {
           <Slot name="content.statusBar" kind="fill" />
           <div className="page-content">
             <ChunkErrorBoundary resetKey={currentPath}>
-              <Suspense
-                fallback={
-                  <Spin
-                    tip={t("common.loading")}
-                    style={{ display: "block", margin: "20vh auto" }}
-                  />
-                }
-              >
+              <Suspense fallback={<LoadingStatus />}>
                 <Routes>
                   {renderableRoutes.map((r) => (
                     <Route

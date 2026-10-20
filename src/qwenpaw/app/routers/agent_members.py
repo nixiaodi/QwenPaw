@@ -3,10 +3,10 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Annotated, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Path, Request
+from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query, Request
 from pydantic import BaseModel
 
 from ...access.actor import ActorContext
@@ -102,6 +102,24 @@ def get_admin_conversation_repository(actor):
     )
 
 
+def _admin_history_persistence(repository, agent_key):
+    """普通历史与完整输出共用同一 Agent 的载荷存储位置。"""
+    from pathlib import Path as FilePath
+    from ...access.agent_repository import agent_database_id
+    from ..chats.run_persistence import PostgresChatRunPersistence
+
+    profile = load_config().agents.profiles.get(agent_key)
+    if profile is None:
+        raise HTTPException(404, "agent_not_found")
+    return PostgresChatRunPersistence(
+        repository=repository,
+        agent_id=agent_database_id(agent_key),
+        payload_storage_dir=FilePath(profile.workspace_dir)
+        / ".qwenpaw"
+        / "chat-event-payloads",
+    )
+
+
 @router.get("/admin/agents/{agentId}/conversations", tags=["admin-agents"])
 async def list_admin_conversations(
     agentId: str,
@@ -130,6 +148,11 @@ async def get_admin_conversation(
     conversation_id: UUID,
     actor: ActorContext = Depends(get_actor),
     service: AgentGovernanceService = Depends(get_governance_service),
+    *,
+    page_size: Annotated[int | None, Query(ge=1, le=50)] = None,
+    before_sequence: Annotated[int | None, Query(ge=1)] = None,
+    view: Literal["raw"] | None = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 100,
 ):
     try:
         await service.require_admin_agent(
@@ -145,35 +168,101 @@ async def get_admin_conversation(
     )
     if conversation is None:
         raise HTTPException(404, "Chat not found")
-    messages = await repository.list_messages(conversation_id)
-    from pathlib import Path as FilePath
+    if view == "raw":
+        messages, has_more, next_before = await repository.list_raw_message_page(
+            conversation_id,
+            limit=limit,
+            before_sequence=before_sequence,
+        )
+        return {
+            "messages": messages,
+            "has_more": has_more,
+            "next_before": next_before,
+            "read_only": True,
+        }
+    has_more, next_before = False, None
+    if page_size is None:
+        messages = await repository.list_messages(conversation_id)
+    else:
+        messages, has_more, next_before = await repository.list_history_page(
+            conversation_id,
+            page_size=page_size,
+            before_sequence=before_sequence,
+        )
     from ..chats.history import project_history_messages
-    from ..chats.run_persistence import PostgresChatRunPersistence
 
-    profile = load_config().agents.profiles.get(agentId)
-    if profile is None:
-        raise HTTPException(404, "agent_not_found")
-    persistence = PostgresChatRunPersistence(
-        repository=repository,
-        agent_id=agent_database_id(agentId),
-        payload_storage_dir=FilePath(profile.workspace_dir)
-        / ".qwenpaw"
-        / "chat-event-payloads",
-    )
+    persistence = _admin_history_persistence(repository, agentId)
     try:
         history_messages = await project_history_messages(
             messages,
             conversation_id=conversation_id,
             load_payload=persistence.load_event_payload,
+            tool_output_path=(
+                lambda message_id: f"/admin/agents/{agentId}/conversations/{conversation_id}/messages/{message_id}/tool-output"
+            )
+            if page_size is not None
+            else None,
         )
     except RuntimeError as exc:
         raise HTTPException(503, "conversation_history_unavailable") from exc
-    return {
+    result = {
         "conversation": conversation,
-        "messages": messages,
         "history_messages": history_messages,
         "read_only": True,
     }
+    if page_size is None:
+        result["messages"] = messages
+    else:
+        result.update(has_more=has_more, next_before=next_before)
+    return result
+
+
+@router.get(
+    "/admin/agents/{agentId}/conversations/{conversation_id}/messages/{message_id}/tool-output",
+    tags=["admin-agents"],
+)
+async def get_admin_conversation_tool_output(
+    agentId: str,
+    conversation_id: UUID,
+    message_id: UUID,
+    actor: ActorContext = Depends(get_actor),
+    service: AgentGovernanceService = Depends(get_governance_service),
+    part: Annotated[int, Query(ge=0)] = 0,
+):
+    """管理员工具读取同时约束管理员权限、Agent 与会话归属。"""
+    try:
+        await service.require_admin_agent(
+            actor=actor,
+            agent_key=agentId,
+            action="agent.admin.conversations.view",
+        )
+    except (AgentGovernanceDeniedError, ValueError) as exc:
+        raise _map_error(exc) from exc
+    from ...access.agent_repository import agent_database_id
+    from ..chats.history import TOOL_OUTPUT_TYPES, project_history_messages
+
+    repository = get_admin_conversation_repository(actor)
+    conversation = await repository.get_conversation_for_admin(
+        agent_database_id(agentId),
+        conversation_id,
+    )
+    if conversation is None:
+        raise HTTPException(404, "Chat not found")
+    record = await repository.get_message(conversation_id, message_id)
+    if record is None or record.conversation_id != conversation_id:
+        raise HTTPException(404, "Message not found")
+    persistence = _admin_history_persistence(repository, agentId)
+    try:
+        messages = await project_history_messages(
+            [record],
+            conversation_id=conversation_id,
+            load_payload=persistence.load_event_payload,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(503, "conversation_history_unavailable") from exc
+    if 0 <= part < len(messages) and messages[part].type.value in TOOL_OUTPUT_TYPES:
+        return messages[part]
+    raise HTTPException(404, "Message not found")
 
 
 @router.get(

@@ -306,25 +306,43 @@ class PostgresConversationRepository(ConversationRepository):
     async def list_conversations_for_admin(self, agent_id: UUID) -> list[dict]:
         """只读排查视图同时检查数据库管理员身份和目标智能体。"""
         async with self._session() as session:
-            rows = (await session.execute(text(
-                f"SELECT c.*, COALESCE(NULLIF(u.display_name,''),u.username) AS owner_name "
-                f"FROM {self._table('conversations')} c "
-                f"JOIN {self._table('users')} u ON u.id=c.owner_user_id "
-                f"JOIN {self._table('agents')} a ON a.id=c.agent_id "
-                f"WHERE c.agent_id=:agent AND c.status<>'deleted' AND a.status<>'deleted' "
-                f"AND {self._table('qwenpaw_is_active_admin')}() ORDER BY c.updated_at DESC"
-            ), {"agent": agent_id})).mappings().all()
+            rows = (
+                (
+                    await session.execute(
+                        text(
+                            f"SELECT c.*, COALESCE(NULLIF(u.display_name,''),u.username) AS owner_name "
+                            f"FROM {self._table('conversations')} c "
+                            f"JOIN {self._table('users')} u ON u.id=c.owner_user_id "
+                            f"JOIN {self._table('agents')} a ON a.id=c.agent_id "
+                            f"WHERE c.agent_id=:agent AND c.status<>'deleted' AND a.status<>'deleted' "
+                            f"AND {self._table('qwenpaw_is_active_admin')}() ORDER BY c.updated_at DESC"
+                        ),
+                        {"agent": agent_id},
+                    )
+                )
+                .mappings()
+                .all()
+            )
         return [dict(row) for row in rows]
 
     async def get_conversation_for_admin(self, agent_id: UUID, conversation_id: UUID):
         """详情使用相同的实时权限，拒绝跨智能体会话标识。"""
         async with self._session() as session:
-            row = (await session.execute(text(
-                f"SELECT c.* FROM {self._table('conversations')} c "
-                f"JOIN {self._table('agents')} a ON a.id=c.agent_id "
-                f"WHERE c.id=:id AND c.agent_id=:agent AND c.status<>'deleted' AND a.status<>'deleted' "
-                f"AND {self._table('qwenpaw_is_active_admin')}()"
-            ), {"id": conversation_id, "agent": agent_id})).mappings().first()
+            row = (
+                (
+                    await session.execute(
+                        text(
+                            f"SELECT c.* FROM {self._table('conversations')} c "
+                            f"JOIN {self._table('agents')} a ON a.id=c.agent_id "
+                            f"WHERE c.id=:id AND c.agent_id=:agent AND c.status<>'deleted' AND a.status<>'deleted' "
+                            f"AND {self._table('qwenpaw_is_active_admin')}()"
+                        ),
+                        {"id": conversation_id, "agent": agent_id},
+                    )
+                )
+                .mappings()
+                .first()
+            )
         return self._row(row, ConversationRecord) if row else None
 
     async def get_conversation_for_user(
@@ -609,6 +627,99 @@ class PostgresConversationRepository(ConversationRepository):
             for message in await self.list_messages(conversation_id)
             if message.status != "superseded"
         ]
+
+    async def has_messages(self, conversation_id: UUID) -> bool:
+        """仅查询有效消息是否存在，不读取 JSON 或外置载荷。"""
+        async with self._session() as session:
+            result = await session.execute(
+                text(
+                    f"SELECT EXISTS (SELECT 1 FROM {self._table('messages')} "
+                    "WHERE conversation_id=:id AND status<>'superseded')"
+                ),
+                {"id": conversation_id},
+            )
+            return bool(result.scalar())
+
+    async def get_message(
+        self, conversation_id: UUID, message_id: UUID
+    ) -> MessageRecord | None:
+        """消息定位必须同时约束已授权会话，避免跨会话读取。"""
+        async with self._session() as session:
+            result = await session.execute(
+                text(
+                    f"SELECT * FROM {self._table('messages')} "
+                    "WHERE conversation_id=:conversation_id AND id=:id AND status<>'superseded'"
+                ),
+                {"conversation_id": conversation_id, "id": message_id},
+            )
+            row = result.mappings().first()
+        return self._row(row, MessageRecord) if row else None
+
+    async def list_history_page(
+        self,
+        conversation_id: UUID,
+        *,
+        page_size: int,
+        before_sequence: int | None = None,
+    ) -> tuple[list[MessageRecord], bool, int | None]:
+        """先读取用户边界，再读取选中轮次，避免加载会话全部载荷。"""
+        if not 1 <= page_size <= 50:
+            raise ValueError("invalid_history_page_size")
+        params = {"id": conversation_id, "size": page_size + 1}
+        condition = "conversation_id=:id AND status<>'superseded'"
+        if before_sequence is not None:
+            condition += " AND sequence<:before"
+            params["before"] = before_sequence
+        async with self._session() as session:
+            result = await session.execute(
+                text(
+                    f"SELECT sequence FROM {self._table('messages')} WHERE {condition} "
+                    "AND role='user' ORDER BY sequence DESC LIMIT :size"
+                ),
+                params,
+            )
+            starts = list(result.scalars())
+            has_more = len(starts) > page_size
+            lower = starts[page_size - 1] if has_more else None
+            if lower is not None:
+                condition += " AND sequence>=:lower"
+                params["lower"] = lower
+            result = await session.execute(
+                text(
+                    f"SELECT * FROM {self._table('messages')} WHERE {condition} ORDER BY sequence"
+                ),
+                params,
+            )
+            rows = result.mappings().all()
+        return [self._row(row, MessageRecord) for row in rows], has_more, lower
+
+    async def list_raw_message_page(
+        self,
+        conversation_id: UUID,
+        *,
+        limit: int = 100,
+        before_sequence: int | None = None,
+    ) -> tuple[list[MessageRecord], bool, int | None]:
+        """原始审计视图保留失效记录，按 sequence 独立分页。"""
+        if not 1 <= limit <= 200:
+            raise ValueError("invalid_raw_page_size")
+        params = {"id": conversation_id, "size": limit + 1}
+        condition = "conversation_id=:id"
+        if before_sequence is not None:
+            condition += " AND sequence<:before"
+            params["before"] = before_sequence
+        async with self._session() as session:
+            result = await session.execute(
+                text(
+                    f"SELECT * FROM {self._table('messages')} WHERE {condition} "
+                    "ORDER BY sequence DESC LIMIT :size"
+                ),
+                params,
+            )
+            rows = result.mappings().all()
+        has_more = len(rows) > limit
+        records = [self._row(row, MessageRecord) for row in reversed(rows[:limit])]
+        return records, has_more, records[0].sequence if has_more else None
 
     async def revise_latest_turn(
         self,

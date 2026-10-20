@@ -18,6 +18,7 @@ from sqlalchemy.pool import NullPool
 
 from qwenpaw.app.chats.models import ChatSpec
 from qwenpaw.app.chats.repo import PostgresConversationRepository
+from qwenpaw.app.chats.repo import ConversationRecord, MessageRecord
 from qwenpaw.app.chats.run_persistence import PostgresChatRunPersistence
 from qwenpaw.app.task_tracker import TaskTracker
 
@@ -95,6 +96,69 @@ async def postgres_chat_runtime(postgres_test_schema):
 def _fixture_events() -> list[dict]:
     fixture = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
     return fixture["events"]
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_history_pages_keep_turns_and_ignore_superseded(postgres_chat_runtime):
+    from datetime import UTC, datetime
+
+    runtime = postgres_chat_runtime
+    repository = runtime["repository"].with_user(runtime["user_id"])
+    now = datetime.now(UTC)
+    conversation_id = uuid4()
+    await repository.create_conversation(
+        ConversationRecord(
+            id=conversation_id,
+            agent_id=runtime["agent_id"],
+            owner_user_id=runtime["user_id"],
+            title="分页",
+            status="active",
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    assert await repository.list_history_page(conversation_id, page_size=5) == (
+        [],
+        False,
+        None,
+    )
+    saved = []
+    for sequence in range(1, 23):
+        role = "user" if sequence % 3 == 1 else "assistant"
+        message = MessageRecord(
+            id=uuid4(),
+            conversation_id=conversation_id,
+            sequence=sequence,
+            role=role,
+            message_type="message",
+            content={"content": []},
+            status="superseded" if sequence >= 19 and sequence <= 21 else "completed",
+            created_by=runtime["user_id"],
+            created_at=now,
+        )
+        saved.append(await repository.save_message(message))
+    assert await repository.has_messages(conversation_id)
+    page, more, before = await repository.list_history_page(
+        conversation_id, page_size=5
+    )
+    assert [row.sequence for row in page] == list(range(7, 19)) + [22]
+    assert more is True and before == 7
+    repeated, _, _ = await repository.list_history_page(conversation_id, page_size=5)
+    assert [row.id for row in repeated] == [row.id for row in page]
+    older, more, before = await repository.list_history_page(
+        conversation_id,
+        page_size=5,
+        before_sequence=before,
+    )
+    assert [row.sequence for row in older] == list(range(1, 7))
+    assert more is False and before is None
+    raw, more, before = await repository.list_raw_message_page(conversation_id, limit=3)
+    assert [row.sequence for row in raw] == [20, 21, 22]
+    assert more is True and before == 20
+    assert await repository.get_message(uuid4(), saved[0].id) is None
+    assert await repository.get_message(conversation_id, saved[0].id) == saved[0]
+    assert not await repository.has_messages(uuid4())
 
 
 @pytest.mark.integration

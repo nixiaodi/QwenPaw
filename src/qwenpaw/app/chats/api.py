@@ -6,8 +6,8 @@ from __future__ import annotations
 import asyncio
 import logging
 from pathlib import Path
-from typing import Literal, Optional
-from uuid import UUID, uuid4
+from typing import Annotated, Literal, Optional
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
@@ -752,6 +752,8 @@ async def get_chat(
     mgr: ChatManager = Depends(get_chat_manager),
     session: SafeJSONSession = Depends(get_session),
     workspace=Depends(get_workspace),
+    page_size: Annotated[int | None, Query(ge=1, le=50)] = None,
+    before_sequence: Annotated[int | None, Query(ge=1)] = None,
 ):
     """Get detailed information about a specific chat by UUID.
 
@@ -784,12 +786,36 @@ async def get_chat(
         actor = get_actor(request)
         if actor.user_id is None:
             raise HTTPException(status_code=404, detail="Chat not found")
+        has_more, next_before = False, None
         try:
-            messages = await _load_postgres_history_messages(
-                manager=mgr,
-                conversation_id=UUID(chat_id),
-                user_id=actor.user_id,
-            )
+            if page_size is not None:
+                (
+                    records,
+                    has_more,
+                    next_before,
+                ) = await mgr.conversation_repository.with_user(
+                    actor.user_id
+                ).list_history_page(
+                    UUID(chat_id), page_size=page_size, before_sequence=before_sequence
+                )
+                from .history import project_history_messages
+
+                messages = await project_history_messages(
+                    records,
+                    conversation_id=UUID(chat_id),
+                    load_payload=getattr(
+                        getattr(mgr, "run_persistence", None),
+                        "load_event_payload",
+                        None,
+                    ),
+                    tool_output_path=lambda message_id: f"/chats/{chat_id}/messages/{message_id}/tool-output",
+                )
+            else:
+                messages = await _load_postgres_history_messages(
+                    manager=mgr,
+                    conversation_id=UUID(chat_id),
+                    user_id=actor.user_id,
+                )
         except RuntimeError as exc:
             raise HTTPException(
                 status_code=503,
@@ -811,6 +837,8 @@ async def get_chat(
             access_role=access.access_role if access else "owner",
             read_only=access.read_only if access else False,
             shared_by=access.shared_by_username if access else None,
+            has_more=has_more,
+            next_before=next_before,
         )
 
     state = await session.get_session_state_dict(
@@ -870,6 +898,9 @@ async def get_chat(
             memories, _summary = parse_legacy_memory_state(memory_raw)
 
     messages = agentscope_msg_to_message(memories)
+    for index, message in enumerate(messages):
+        original_id = (message.metadata or {}).get("original_id", "")
+        message.id = str(uuid5(NAMESPACE_URL, f"chat:{chat_id}:{original_id}:{index}"))
     if is_multi_user_enabled():
         actor = get_actor(request)
         attachments = []
@@ -882,13 +913,103 @@ async def get_chat(
             attachments,
             hide_unowned_local_urls=bool(access and access.read_only),
         )
+    has_more, next_before = False, None
+    if page_size is not None:
+        from .history import compact_tool_output, page_legacy_messages
+
+        messages, has_more, next_before = page_legacy_messages(
+            messages,
+            page_size=page_size,
+            before_sequence=before_sequence,
+        )
+        messages = [
+            compact_tool_output(
+                message,
+                path=f"/chats/{chat_id}/messages/{message.id}/tool-output",
+            )
+            for message in messages
+        ]
     return ChatHistory(
         messages=messages,
         status=status,
         access_role=access.access_role if access else "owner",
         read_only=access.read_only if access else False,
         shared_by=access.shared_by_username if access else None,
+        has_more=has_more,
+        next_before=next_before,
     )
+
+
+@router.get("/{chat_id}/summary")
+async def get_chat_summary(
+    chat_id: str,
+    request: Request,
+    mgr: ChatManager = Depends(get_chat_manager),
+    session: SafeJSONSession = Depends(get_session),
+    workspace=Depends(get_workspace),
+):
+    """用原有会话权限读取轻量消息存在性，避免首次跳转投影整个历史。"""
+    if is_multi_user_enabled():
+        await _require_readable_chat(request, mgr, workspace, chat_id)
+        if load_cutover_policy().read_uses_postgres(CutoverDomain.MESSAGES):
+            actor = get_actor(request)
+            return {
+                "has_messages": await mgr.conversation_repository.with_user(
+                    actor.user_id
+                ).has_messages(UUID(chat_id))
+            }
+    history = await get_chat(
+        chat_id, request, mgr=mgr, session=session, workspace=workspace
+    )
+    return {"has_messages": bool(history.messages)}
+
+
+@router.get("/{chat_id}/messages/{message_id}/tool-output", response_model=Message)
+async def get_chat_tool_output(
+    chat_id: str,
+    message_id: str,
+    request: Request,
+    mgr: ChatManager = Depends(get_chat_manager),
+    session: SafeJSONSession = Depends(get_session),
+    workspace=Depends(get_workspace),
+    part: Annotated[int, Query(ge=0)] = 0,
+):
+    """只允许从已授权会话读取有效工具输出，保持原始内容完整。"""
+    from .history import TOOL_OUTPUT_TYPES, project_history_messages
+
+    if is_multi_user_enabled() and load_cutover_policy().read_uses_postgres(
+        CutoverDomain.MESSAGES
+    ):
+        await _require_readable_chat(request, mgr, workspace, chat_id)
+        actor = get_actor(request)
+        try:
+            conversation_id, record_id = UUID(chat_id), UUID(message_id)
+        except ValueError as exc:
+            raise HTTPException(404, "Message not found") from exc
+        record = await mgr.conversation_repository.with_user(actor.user_id).get_message(
+            conversation_id,
+            record_id,
+        )
+        if record is None or record.conversation_id != conversation_id:
+            raise HTTPException(404, "Message not found")
+        try:
+            messages = await project_history_messages(
+                [record],
+                conversation_id=conversation_id,
+                load_payload=getattr(
+                    getattr(mgr, "run_persistence", None), "load_event_payload", None
+                ),
+            )
+        except RuntimeError as exc:
+            raise HTTPException(503, "conversation_history_unavailable") from exc
+    else:
+        history = await get_chat(
+            chat_id, request, mgr=mgr, session=session, workspace=workspace
+        )
+        messages = [message for message in history.messages if message.id == message_id]
+    if 0 <= part < len(messages) and messages[part].type.value in TOOL_OUTPUT_TYPES:
+        return messages[part]
+    raise HTTPException(404, "Message not found")
 
 
 @router.put("/{chat_id}", response_model=ChatSpec)

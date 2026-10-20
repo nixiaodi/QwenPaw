@@ -11,6 +11,7 @@ import api, {
   isConversationReadOnly,
 } from "../../../api";
 import { toDisplayUrl } from "../utils";
+import { HISTORY_PAGE_SIZE, historyPageKey, rememberHistoryPage } from "../historyPaging";
 import { useAgentStore } from "../../../stores/agentStore";
 import {
   extractTurnUsageFromOutputMessages,
@@ -300,7 +301,7 @@ const buildResponseCard = (
   const turnUsage = extractTurnUsageFromOutputMessages(outputMessages);
 
   return {
-    id: generateId(),
+    id: `history-response-${outputMessages[0]?.id || generateId()}`,
     role: ROLE_ASSISTANT,
     cards: [
       {
@@ -666,6 +667,12 @@ class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
   /** Invalidate the converted cache for a session (call after sending a message). */
   invalidateConvertedCache(backendId: string): void {
     this.convertedSessionCache.delete(backendId);
+    for (const [key, entry] of this.sessionResultCache) {
+      if (this.getEffectiveSessionId(key) === backendId ||
+          this.getEffectiveSessionId(entry.session.id) === backendId) {
+        this.sessionResultCache.delete(key);
+      }
+    }
   }
 
   /**
@@ -1502,16 +1509,22 @@ class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
    * state (window identity, turn-usage store, converted cache) only while
    * the caller's owner epoch is still active.
    */
+  async refreshSessionFromHistory(backendId: string, history: ChatHistory) {
+    this.invalidateConvertedCache(backendId);
+    return this.fetchAndBuildSession(backendId, backendId, this.findSession(backendId), undefined, this.getActiveOwner(), history);
+  }
+
   private async fetchAndBuildSession(
     displayId: string,
     backendId: string,
     listEntry: ExtendedSession | undefined,
     signal: AbortSignal | undefined,
     owner: SessionOwnerToken,
+    suppliedHistory?: ChatHistory,
   ): Promise<ExtendedSession> {
     // Check LRU cache for non-generating sessions
     const isIdle = !listEntry?.generating;
-    if (isIdle) {
+    if (isIdle && !suppliedHistory) {
       const cached = this.getCachedConvertedSession(
         backendId,
         listEntry?.updatedAt,
@@ -1528,7 +1541,11 @@ class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
       }
     }
 
-    const chatHistory = await api.getChat(backendId, { signal });
+    const pageKey = historyPageKey(backendId);
+    const chatHistory = suppliedHistory ?? await api.getChat(backendId, { signal, pageSize: HISTORY_PAGE_SIZE });
+    if (this.isActiveOwner(owner) && historyPageKey(backendId) === pageKey && !signal?.aborted) {
+      rememberHistoryPage(pageKey, chatHistory);
+    }
     if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
     const generating = isGenerating(chatHistory);
     const messages = convertMessages(chatHistory.messages || [], generating);

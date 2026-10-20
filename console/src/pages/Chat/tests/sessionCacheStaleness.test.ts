@@ -143,4 +143,27 @@ describe("SessionApi converted-cache staleness on updated_at change (#6131)", ()
     // Cache is still valid: no extra network fetch.
     expect(getChatSpy).toHaveBeenCalledTimes(1);
   });
+  it("invalidates preload results with their paging cursor before reopening a conversation", async () => {
+    const id = "44444444-4444-4444-8444-444444444444";
+    vi.spyOn(api, "listChats").mockResolvedValue([makeChatSpec(id, T0)]);
+    const getChat = vi.spyOn(api, "getChat").mockResolvedValue({
+      ...makeHistory([{ role: "user", text: "latest" }]),
+      has_more: true, next_before: 21,
+    });
+    await sessionApi.getSessionList();
+    await sessionApi.preloadSession(id);
+    expect(getChat).toHaveBeenCalledWith(id, { signal: undefined, pageSize: 5 });
+    sessionApi.invalidateConvertedCache(id);
+    await sessionApi.getSession(id);
+    expect(getChat).toHaveBeenCalledTimes(2);
+  });
+
+  it("reuses the bounded resume response instead of downloading history again", async () => {
+    const getChat = vi.spyOn(api, "getChat");
+    const history = makeHistory([{ role: "user", text: "resumed" }]);
+    const session = await sessionApi.refreshSessionFromHistory("resume-history", history);
+    expect(session.messages).toHaveLength(1);
+    expect(getChat).not.toHaveBeenCalled();
+  });
+
 });

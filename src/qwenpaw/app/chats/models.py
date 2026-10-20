@@ -112,6 +112,8 @@ class ChatHistory(BaseModel):
     access_role: Literal["owner", "viewer"] = "owner"
     read_only: bool = False
     shared_by: str | None = None
+    has_more: bool = False
+    next_before: int | None = None
 
 
 class BatchFailure(BaseModel):

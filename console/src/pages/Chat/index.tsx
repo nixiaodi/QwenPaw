@@ -91,6 +91,7 @@ import { wrapReplayFastForward } from "./replayFastForward";
 import { useTurnUsageStore } from "./turnUsageStore";
 import ChatHeaderTitle from "./components/ChatHeaderTitle";
 import ChatSessionInitializer from "./components/ChatSessionInitializer";
+import HistoryPaginationBridge from "./components/HistoryPaginationBridge";
 import { replaceRuntimeMessageSnapshot } from "./runtimeMessageSnapshot";
 import { ChatTransportLifecycle } from "./chatTransportLifecycle";
 import { ApprovalCard } from "../../components/ApprovalCard/ApprovalCard";
@@ -3273,12 +3274,14 @@ export default function ChatPage() {
     }
 
     resumeSyncInFlightRef.current = true;
+    const resumeOwner = sessionApi.getActiveOwner();
     try {
       await sessionApi.getSessionList();
       const realId = sessionApi.getRealIdForSession(sessionId) ?? sessionId;
       if (!realId || /^\d+$/.test(realId)) return;
 
-      const history = await chatApi.getChat(realId);
+      const history = await chatApi.getChat(realId, { pageSize: 5 });
+      if (!sessionApi.isActiveOwner(resumeOwner)) return;
       if ((history.messages || []).length === 0) return;
 
       const currentMessageCount =
@@ -3291,8 +3294,10 @@ export default function ChatPage() {
         frontendRunning: Boolean(chatLoadingRef.current),
       });
       if (resumeAction === "replace_history") {
-        sessionApi.invalidateConvertedCache(realId);
-        const canonicalSession = await sessionApi.getSession(realId);
+        const requestedActiveId = chatIdRef.current || window.currentSessionId || "";
+        const requestedActiveRealId = sessionApi.getRealIdForSession(requestedActiveId) ?? requestedActiveId;
+        if (!isChatActiveRef.current || requestedActiveRealId !== realId) return;
+        const canonicalSession = await sessionApi.refreshSessionFromHistory(realId, history);
         const activeId = chatIdRef.current || window.currentSessionId || "";
         const activeRealId =
           sessionApi.getRealIdForSession(activeId) ?? activeId;
@@ -3572,7 +3577,7 @@ export default function ChatPage() {
             await new Promise((resolve) => setTimeout(resolve, 150));
         }
         if (!conversationId) throw new Error(t("chat.editNotReady"));
-        const history = await chatApi.getChat(conversationId);
+        const history = await chatApi.getChat(conversationId, { pageSize: 5 });
         const input =
           data.input?.filter((item) => item.role === "user").slice(-1)[0] ||
           data.input?.slice(-1)[0];
@@ -4350,6 +4355,7 @@ export default function ChatPage() {
               onLoadingChange={setChatLoading}
             />
             <ChatHeaderTitle />
+            {usesQwenPawBackend && <HistoryPaginationBridge />}
             <span style={{ flex: 1 }} />
             {isPublicationConversation ? (
               <PublicationModelLock

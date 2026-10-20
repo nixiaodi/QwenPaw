@@ -10,7 +10,22 @@
     <title>WeldonAgent</title>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <div
+        role="status"
+        aria-live="polite"
+        aria-busy="true"
+        style="
+          display: grid;
+          place-items: center;
+          min-height: 100vh;
+          color: #767676;
+          font-family: system-ui, sans-serif;
+        "
+      >
+        正在加载 / Loading…
+      </div>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

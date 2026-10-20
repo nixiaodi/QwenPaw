@@ -275,15 +275,29 @@ export const agentsApi = {
     agentId: string,
     conversationId: string,
     signal?: AbortSignal,
+    options?: { pageSize?: number; beforeSequence?: number; raw?: boolean },
   ) =>
     request<{
-      messages: AdminConversationMessage[];
+      messages?: AdminConversationMessage[];
+      has_more?: boolean;
+      next_before?: number | null;
       history_messages: Message[];
       read_only: true;
     }>(
       `/admin/agents/${encodeURIComponent(
         agentId,
-      )}/conversations/${encodeURIComponent(conversationId)}`,
+      )}/conversations/${encodeURIComponent(conversationId)}${
+        options
+          ? `?${new URLSearchParams({
+              ...(options.raw
+                ? { view: "raw", limit: "100" }
+                : { page_size: String(options.pageSize || 5) }),
+              ...(options.beforeSequence != null
+                ? { before_sequence: String(options.beforeSequence) }
+                : {}),
+            })}`
+          : ""
+      }`,
       { signal },
     ),
 

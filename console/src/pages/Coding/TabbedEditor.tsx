@@ -12,6 +12,8 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
+// Configure the bundled Monaco runtime and local workers before editors mount.
+import "../../monacoSetup";
 import Editor, {
   DiffEditor,
   type Monaco,

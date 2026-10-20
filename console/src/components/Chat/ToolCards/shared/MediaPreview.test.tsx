@@ -9,12 +9,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 
-vi.mock("@agentscope-ai/chat", () => ({
-  Attachments: {
-    FileCard: ({ item }: { item: { name: string } }) => (
-      <div data-testid="file-card">{item.name}</div>
-    ),
-  },
+vi.mock("@agentscope-ai/chat/lib/Attachments/FileList/FileListCard", () => ({
+  default: ({ item }: { item: { name: string } }) => (
+    <div data-testid="file-card">{item.name}</div>
+  ),
 }));
 
 vi.mock("@agentscope-ai/design", () => ({

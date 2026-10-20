@@ -26,6 +26,8 @@ export interface Message {
 
 export interface ChatHistory {
   messages: Message[];
+  has_more?: boolean;
+  next_before?: number | null;
   status?: ChatStatus; // Conversation status: idle or running
   access_role?: "owner" | "viewer";
   read_only?: boolean;

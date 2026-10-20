@@ -21,10 +21,14 @@ vi.mock("@agentscope-ai/design", async () => ({
   ...(await vi.importActual("@agentscope-ai/design")),
   ConfigProvider: (await import("antd")).ConfigProvider,
   generateTheme: (
-    await import("../../../../node_modules/@agentscope-ai/design/lib/antd/themes/generateTheme")
+    await import(
+      "../../../../node_modules/@agentscope-ai/design/lib/antd/themes/generateTheme"
+    )
   ).default,
   generateThemeByToken: (
-    await import("../../../../node_modules/@agentscope-ai/design/lib/antd/themes/generateThemeByToken")
+    await import(
+      "../../../../node_modules/@agentscope-ai/design/lib/antd/themes/generateThemeByToken"
+    )
   ).default,
 }));
 
@@ -103,6 +107,12 @@ it("shows conversations for an Agent outside the user's store and opens read-onl
   );
   fireEvent.click(screen.getByRole("button", { name: "查看详情" }));
   expect(await screen.findByText("用户的问题")).toBeInTheDocument();
+  expect(agentsApi.getAdminConversation).toHaveBeenCalledWith(
+    "other",
+    "chat-1",
+    expect.any(AbortSignal),
+    { pageSize: 5 },
+  );
   expect(screen.getByRole("dialog")).toHaveTextContent("只读");
   expect(
     screen.queryByRole("button", { name: "发送" }),
@@ -224,8 +234,62 @@ it("shows tool cards and keeps replaced records behind the raw-record switch", a
   expect(await within(dialog).findByText(/执行 read_file/)).toBeInTheDocument();
   expect(within(dialog).getByText("文件检查完成")).toBeInTheDocument();
   expect(within(dialog).queryByText(/被替换的原问题/)).not.toBeInTheDocument();
+  vi.mocked(agentsApi.getAdminConversation).mockResolvedValueOnce({
+    read_only: true,
+    history_messages: [],
+    messages: [{ id: "old", content: { text: "被替换的原问题" } }] as never,
+  });
+  expect(agentsApi.getAdminConversation).toHaveBeenCalledTimes(1);
   fireEvent.click(within(dialog).getByRole("button", { name: "原始记录" }));
-  expect(within(dialog).getByText(/被替换的原问题/)).toBeInTheDocument();
+  expect(await within(dialog).findByText(/被替换的原问题/)).toBeInTheDocument();
+  expect(agentsApi.getAdminConversation).toHaveBeenLastCalledWith(
+    "other",
+    "chat-1",
+    expect.any(AbortSignal),
+    { raw: true },
+  );
   fireEvent.click(within(dialog).getByRole("button", { name: "聊天视图" }));
   expect(within(dialog).queryByText(/被替换的原问题/)).not.toBeInTheDocument();
+});
+
+it("loads earlier turns through a cursor without duplicating messages", async () => {
+  vi.mocked(agentsApi.getAdminConversation).mockResolvedValueOnce({
+    read_only: true,
+    history_messages: [
+      {
+        id: "new",
+        role: "user",
+        type: "message",
+        content: [{ type: "text", text: "最近的问题" }],
+      },
+    ],
+    has_more: true,
+    next_before: 21,
+  });
+  renderWithProviders(<AdminConversations />);
+  fireEvent.click(await screen.findByRole("button", { name: "查看详情" }));
+  expect(await screen.findByText("最近的问题")).toBeInTheDocument();
+  vi.mocked(agentsApi.getAdminConversation).mockResolvedValueOnce({
+    read_only: true,
+    history_messages: [
+      {
+        id: "old",
+        role: "user",
+        type: "message",
+        content: [{ type: "text", text: "更早的问题" }],
+      },
+    ],
+    has_more: false,
+    next_before: null,
+  });
+  fireEvent.click(screen.getByRole("button", { name: "加载更早消息" }));
+  expect(await screen.findByText("更早的问题")).toBeInTheDocument();
+  expect(screen.getAllByText("最近的问题")).toHaveLength(1);
+  expect(agentsApi.getAdminConversation).toHaveBeenLastCalledWith(
+    "other",
+    "chat-1",
+    expect.any(AbortSignal),
+    { pageSize: 5, beforeSequence: 21 },
+  );
+  expect(screen.queryByRole("button", { name: "加载更早消息" })).toBeNull();
 });

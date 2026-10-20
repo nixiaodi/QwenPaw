@@ -6,6 +6,8 @@ import { useCodingTabsStore } from "../../stores/codingTabsStore";
 
 const SCOPE_KEY = "agent:default";
 
+vi.mock("../../monacoSetup", () => ({}));
+
 vi.mock("@monaco-editor/react", () => ({
   default: ({
     value,

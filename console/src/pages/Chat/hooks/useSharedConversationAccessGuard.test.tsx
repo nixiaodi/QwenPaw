@@ -6,14 +6,14 @@ import { useSharedConversationAccessGuard } from "./useSharedConversationAccessG
 
 vi.mock("../../../api/modules/chat", () => ({
   chatApi: {
-    getChat: vi.fn(),
+    getChatSummary: vi.fn(),
   },
 }));
 
 describe("useSharedConversationAccessGuard", () => {
   beforeEach(() => {
     vi.useFakeTimers();
-    vi.mocked(chatApi.getChat).mockReset();
+    vi.mocked(chatApi.getChatSummary).mockReset();
   });
 
   afterEach(() => {
@@ -22,7 +22,7 @@ describe("useSharedConversationAccessGuard", () => {
 
   it("撤销共享权限后立即通知页面清理只读会话", async () => {
     const onRevoked = vi.fn();
-    vi.mocked(chatApi.getChat).mockRejectedValue(
+    vi.mocked(chatApi.getChatSummary).mockRejectedValue(
       new Error('not_found - {"detail":"Chat not found"}'),
     );
 
@@ -39,13 +39,13 @@ describe("useSharedConversationAccessGuard", () => {
       await vi.runOnlyPendingTimersAsync();
     });
 
-    expect(chatApi.getChat).toHaveBeenCalledWith("shared-chat");
+    expect(chatApi.getChatSummary).toHaveBeenCalledWith("shared-chat");
     expect(onRevoked).toHaveBeenCalledTimes(1);
   });
 
   it("临时网络错误不会误判为权限撤销", async () => {
     const onRevoked = vi.fn();
-    vi.mocked(chatApi.getChat).mockRejectedValue(new Error("Failed to fetch"));
+    vi.mocked(chatApi.getChatSummary).mockRejectedValue(new Error("Failed to fetch"));
 
     renderHook(() =>
       useSharedConversationAccessGuard({
@@ -77,6 +77,6 @@ describe("useSharedConversationAccessGuard", () => {
       await vi.runOnlyPendingTimersAsync();
     });
 
-    expect(chatApi.getChat).not.toHaveBeenCalled();
+    expect(chatApi.getChatSummary).not.toHaveBeenCalled();
   });
 });

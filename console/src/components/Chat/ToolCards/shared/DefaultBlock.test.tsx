@@ -5,20 +5,20 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 
-vi.mock("@agentscope-ai/chat", () => ({
-  Markdown: ({ content }: { content: string }) => (
+vi.mock("@agentscope-ai/chat/lib/Markdown", () => ({
+  default: ({ content }: { content: string }) => (
     <div data-testid="markdown">{content}</div>
   ),
 }));
 
-vi.mock("react-syntax-highlighter", () => ({
-  Prism: ({ children }: { children: string }) => (
+vi.mock("react-syntax-highlighter/dist/esm/prism", () => ({
+  default: ({ children }: { children: string }) => (
     <pre data-testid="syntax">{children}</pre>
   ),
 }));
 
-vi.mock("react-syntax-highlighter/dist/esm/styles/prism", () => ({
-  oneDark: {},
+vi.mock("react-syntax-highlighter/dist/esm/styles/prism/one-dark", () => ({
+  default: {},
 }));
 
 const { copyTextMock } = vi.hoisted(() => ({
@@ -76,9 +76,41 @@ describe("DefaultBlock large output", () => {
   const makeLines = (count: number) =>
     Array.from({ length: count }, (_, i) => `line-${i + 1}`).join("\n");
 
-  it("keeps syntax highlighting for small content", () => {
-    render(<DefaultBlock title="Output" content={makeLines(10)} />);
-    expect(screen.getByTestId("syntax")).toBeInTheDocument();
+  it("shows usable plain text while a syntax renderer is loading", async () => {
+    render(
+      <DefaultBlock title="Output" content="echo local" language="bash" />,
+    );
+    expect(screen.getByRole("status")).toHaveTextContent("echo local");
+    expect(await screen.findByTestId("syntax")).toHaveTextContent("echo local");
+  });
+
+  it("keeps syntax highlighting for small declared-language content", async () => {
+    render(
+      <DefaultBlock title="Output" content={makeLines(10)} language="bash" />,
+    );
+    expect(await screen.findByTestId("syntax")).toBeInTheDocument();
+  });
+
+  it("keeps Markdown readable until its renderer is ready", async () => {
+    const content = "# Local result\n\n**Complete**";
+    render(<DefaultBlock title="Output" content={content} />);
+    expect(screen.getByRole("status")).toHaveTextContent("# Local result");
+    expect(await screen.findByTestId("markdown")).toHaveTextContent(
+      "**Complete**",
+    );
+  });
+
+  it("keeps JSON formatting and separate stdout after lazy rendering", async () => {
+    render(
+      <DefaultBlock
+        title="Output"
+        content={'{"status":true}\n[stdout]\nplain stdout'}
+      />,
+    );
+    expect((await screen.findByTestId("syntax")).textContent).toBe(
+      '{\n  "status": true\n}',
+    );
+    expect(screen.getByText("plain stdout")).toBeInTheDocument();
   });
 
   it("renders many-line output as plain text with head and tail", () => {

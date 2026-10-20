@@ -5,8 +5,7 @@
  * desktop_screenshot, send_file_to_user, and the default fallback).
  */
 
-import React, { useCallback, useEffect, useState } from "react";
-import { Attachments } from "@agentscope-ai/chat";
+import React, { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import { Audio, Video } from "@agentscope-ai/design";
 import { Image, ConfigProvider, Alert } from "antd";
 import type { Locale } from "antd/es/locale";
@@ -14,6 +13,11 @@ import { useTranslation } from "react-i18next";
 import type { MediaInfo } from "./utils";
 import { filePathFromPreviewUrl } from "../../../../features/files-workspace/internalFileLinks";
 import styles from "./toolCards.module.less";
+
+// This vendor component imports the chat barrel internally, so keep it lazy.
+const FileCard = lazy(
+  () => import("@agentscope-ai/chat/lib/Attachments/FileList/FileListCard"),
+);
 
 export interface MediaPreviewProps {
   media: MediaInfo;
@@ -143,14 +147,16 @@ const MediaPreview: React.FC<MediaPreviewProps> = ({ media, onFileOpen }) => {
             );
           }}
         >
-          <Attachments.FileCard
-            item={{
-              uid: media.name,
-              name: media.name,
-              url: media.url,
-              status: "done",
-            }}
-          />
+          <Suspense fallback={<span>{media.name}</span>}>
+            <FileCard
+              item={{
+                uid: media.name,
+                name: media.name,
+                url: media.url,
+                status: "done",
+              }}
+            />
+          </Suspense>
         </div>
       )}
     </div>

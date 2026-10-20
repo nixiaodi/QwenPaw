@@ -6,18 +6,57 @@
  * - Declared language → rendered via syntax highlighting before auto-detection
  * - Markdown content → rendered via Markdown component
  * - JSON content → pretty-printed and rendered with syntax highlighting
- * - Plain text → rendered with syntax highlighting
+ * - Plain text / stdout → rendered directly without loading a syntax renderer
  */
 
-import React, { useCallback, useMemo, useRef, useState } from "react";
+import React, {
+  lazy,
+  Suspense,
+  useCallback,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useTranslation } from "react-i18next";
-import { Markdown } from "@agentscope-ai/chat";
 import { CopyOutlined, CheckOutlined } from "@ant-design/icons";
-import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
-import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { copyText } from "@/utils/clipboard";
 import { looksLikeMarkdown } from "./utils";
 import styles from "./toolCards.module.less";
+
+const Markdown = lazy(() => import("./DefaultBlockMarkdown"));
+const SyntaxHighlighter = lazy(() => import("./DefaultBlockHighlighter"));
+
+function PlainText({
+  content,
+  loading = false,
+}: {
+  content: string;
+  loading?: boolean;
+}) {
+  return (
+    <pre
+      className={styles.defaultBlockContent}
+      role={loading ? "status" : undefined}
+      aria-busy={loading || undefined}
+    >
+      {content}
+    </pre>
+  );
+}
+
+function HighlightedText({
+  content,
+  language,
+}: {
+  content: string;
+  language: string;
+}) {
+  return (
+    <Suspense fallback={<PlainText content={content} loading />}>
+      <SyntaxHighlighter content={content} language={language} />
+    </Suspense>
+  );
+}
 
 export interface DefaultBlockProps {
   title: string;
@@ -105,16 +144,6 @@ function buildLargeExcerpt(content: string): LargeExcerpt | null {
   return { head, tail, omittedLines, charTrimmed };
 }
 
-const highlighterStyle = {
-  margin: 0,
-  borderRadius: 0,
-  padding: "10px 12px",
-  fontSize: "12px",
-  lineHeight: "1.6",
-  maxHeight: "300px",
-  overflowY: "auto" as const,
-};
-
 const DefaultBlock: React.FC<DefaultBlockProps> = ({
   title,
   content,
@@ -179,46 +208,26 @@ const DefaultBlock: React.FC<DefaultBlockProps> = ({
       );
     }
     if (declared) {
-      return (
-        <SyntaxHighlighter
-          language={language}
-          style={oneDark}
-          customStyle={highlighterStyle}
-          wrapLongLines
-        >
-          {head}
-        </SyntaxHighlighter>
-      );
+      return <HighlightedText content={head} language={language} />;
     }
     if (isMarkdown) {
       return (
         <div className={styles.defaultBlockContentMd}>
-          <Markdown content={head} />
+          <Suspense fallback={<PlainText content={head} loading />}>
+            <Markdown content={head} />
+          </Suspense>
         </div>
       );
     }
     if (parsedJson !== null) {
       return (
-        <SyntaxHighlighter
+        <HighlightedText
+          content={JSON.stringify(parsedJson, null, 2)}
           language="json"
-          style={oneDark}
-          customStyle={highlighterStyle}
-          wrapLongLines
-        >
-          {JSON.stringify(parsedJson, null, 2)}
-        </SyntaxHighlighter>
+        />
       );
     }
-    return (
-      <SyntaxHighlighter
-        language="text"
-        style={oneDark}
-        customStyle={highlighterStyle}
-        wrapLongLines
-      >
-        {head}
-      </SyntaxHighlighter>
-    );
+    return <PlainText content={head} />;
   };
 
   return (
@@ -235,16 +244,7 @@ const DefaultBlock: React.FC<DefaultBlockProps> = ({
         </button>
       </div>
       {renderContent()}
-      {stdout !== null && !largeExcerpt && (
-        <SyntaxHighlighter
-          language="text"
-          style={oneDark}
-          customStyle={highlighterStyle}
-          wrapLongLines
-        >
-          {stdout}
-        </SyntaxHighlighter>
-      )}
+      {stdout !== null && !largeExcerpt && <PlainText content={stdout} />}
     </div>
   );
 };

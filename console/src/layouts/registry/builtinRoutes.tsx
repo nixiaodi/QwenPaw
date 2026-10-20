@@ -5,8 +5,8 @@
  * `useRoutes()` snapshot returns them. Plugin routes are registered via
  * `QwenPaw.route.add(...)` into the same registry and treated uniformly.
  *
- * Lazy components use `lazyImportWithRetry` inline; the eager Chat page is
- * passed as ComponentType directly. The `/` redirect is a
+ * Page components use `lazyImportWithRetry` so visiting a route also registers
+ * its exports for plugins. The `/` redirect is a
  * named route with a tiny DefaultRedirect component so routeRegistry has a
  * single uniform shape.
  *
@@ -19,10 +19,8 @@ import { routeRegistry } from "../../plugins/registry/store";
 import type { Route } from "../../plugins/registry/types";
 import { Capability } from "../../access/capabilities";
 
-// Eager pages
-import Chat from "../../pages/Chat/route";
-
 // Lazy pages
+const Chat = lazyImportWithRetry("../../pages/Chat/route.tsx");
 const ChannelsPage = lazyImportWithRetry("../../pages/Control/Channels");
 const SessionsPage = lazyImportWithRetry("../../pages/Control/Sessions");
 const InboxPage = lazyImportWithRetry("../../pages/Inbox");

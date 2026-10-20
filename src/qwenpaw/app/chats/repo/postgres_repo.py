@@ -303,6 +303,30 @@ class PostgresConversationRepository(ConversationRepository):
             )
         return records
 
+    async def list_conversations_for_admin(self, agent_id: UUID) -> list[dict]:
+        """只读排查视图同时检查数据库管理员身份和目标智能体。"""
+        async with self._session() as session:
+            rows = (await session.execute(text(
+                f"SELECT c.*, COALESCE(NULLIF(u.display_name,''),u.username) AS owner_name "
+                f"FROM {self._table('conversations')} c "
+                f"JOIN {self._table('users')} u ON u.id=c.owner_user_id "
+                f"JOIN {self._table('agents')} a ON a.id=c.agent_id "
+                f"WHERE c.agent_id=:agent AND c.status<>'deleted' AND a.status<>'deleted' "
+                f"AND {self._table('qwenpaw_is_active_admin')}() ORDER BY c.updated_at DESC"
+            ), {"agent": agent_id})).mappings().all()
+        return [dict(row) for row in rows]
+
+    async def get_conversation_for_admin(self, agent_id: UUID, conversation_id: UUID):
+        """详情使用相同的实时权限，拒绝跨智能体会话标识。"""
+        async with self._session() as session:
+            row = (await session.execute(text(
+                f"SELECT c.* FROM {self._table('conversations')} c "
+                f"JOIN {self._table('agents')} a ON a.id=c.agent_id "
+                f"WHERE c.id=:id AND c.agent_id=:agent AND c.status<>'deleted' AND a.status<>'deleted' "
+                f"AND {self._table('qwenpaw_is_active_admin')}()"
+            ), {"id": conversation_id, "agent": agent_id})).mappings().first()
+        return self._row(row, ConversationRecord) if row else None
+
     async def get_conversation_for_user(
         self,
         *,

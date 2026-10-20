@@ -94,6 +94,88 @@ def _map_error(exc: Exception) -> HTTPException:
     raise exc
 
 
+def get_admin_conversation_repository(actor):
+    from ..chats.repo.postgres_repo import PostgresConversationRepository
+
+    return PostgresConversationRepository(schema=get_identity_schema()).with_user(
+        actor.user_id
+    )
+
+
+@router.get("/admin/agents/{agentId}/conversations", tags=["admin-agents"])
+async def list_admin_conversations(
+    agentId: str,
+    actor: ActorContext = Depends(get_actor),
+    service: AgentGovernanceService = Depends(get_governance_service),
+):
+    try:
+        await service.require_admin_agent(
+            actor=actor, agent_key=agentId, action="agent.admin.conversations.list"
+        )
+    except (AgentGovernanceDeniedError, ValueError) as exc:
+        raise _map_error(exc) from exc
+    from ...access.agent_repository import agent_database_id
+
+    rows = await get_admin_conversation_repository(actor).list_conversations_for_admin(
+        agent_database_id(agentId)
+    )
+    return {"conversations": rows, "read_only": True}
+
+
+@router.get(
+    "/admin/agents/{agentId}/conversations/{conversation_id}", tags=["admin-agents"]
+)
+async def get_admin_conversation(
+    agentId: str,
+    conversation_id: UUID,
+    actor: ActorContext = Depends(get_actor),
+    service: AgentGovernanceService = Depends(get_governance_service),
+):
+    try:
+        await service.require_admin_agent(
+            actor=actor, agent_key=agentId, action="agent.admin.conversations.view"
+        )
+    except (AgentGovernanceDeniedError, ValueError) as exc:
+        raise _map_error(exc) from exc
+    from ...access.agent_repository import agent_database_id
+
+    repository = get_admin_conversation_repository(actor)
+    conversation = await repository.get_conversation_for_admin(
+        agent_database_id(agentId), conversation_id
+    )
+    if conversation is None:
+        raise HTTPException(404, "Chat not found")
+    messages = await repository.list_messages(conversation_id)
+    from pathlib import Path as FilePath
+    from ..chats.history import project_history_messages
+    from ..chats.run_persistence import PostgresChatRunPersistence
+
+    profile = load_config().agents.profiles.get(agentId)
+    if profile is None:
+        raise HTTPException(404, "agent_not_found")
+    persistence = PostgresChatRunPersistence(
+        repository=repository,
+        agent_id=agent_database_id(agentId),
+        payload_storage_dir=FilePath(profile.workspace_dir)
+        / ".qwenpaw"
+        / "chat-event-payloads",
+    )
+    try:
+        history_messages = await project_history_messages(
+            messages,
+            conversation_id=conversation_id,
+            load_payload=persistence.load_event_payload,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(503, "conversation_history_unavailable") from exc
+    return {
+        "conversation": conversation,
+        "messages": messages,
+        "history_messages": history_messages,
+        "read_only": True,
+    }
+
+
 @router.get(
     "/agents/{agentId}/members",
     response_model=list[AgentMemberResponse],

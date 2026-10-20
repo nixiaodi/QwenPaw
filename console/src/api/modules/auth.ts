@@ -118,6 +118,7 @@ export const authApi = {
     const res = await fetch(getApiUrl("/auth/refresh"), {
       method: "POST",
       credentials: "include",
+      signal: AbortSignal.timeout(10000),
     });
     if (!res.ok) throw await detailError(res, "Session expired");
     return res.json();
@@ -128,6 +129,8 @@ export const authApi = {
       method: "POST",
       credentials: "include",
       headers: bearerHeaders(),
+      keepalive: true,
+      signal: AbortSignal.timeout(10000),
     });
     if (!res.ok) throw await detailError(res, "Logout failed");
     return res.json();

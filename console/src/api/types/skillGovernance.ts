@@ -15,6 +15,7 @@ export interface SkillSourceState {
 }
 export interface GovernedSkill extends SkillCatalogItem {
   status: "active" | "disabled";
+  visibility: "public" | "restricted";
 }
 export interface SkillPreview {
   name: string;
@@ -26,6 +27,14 @@ export interface SkillGrant {
   enabled: boolean;
   changed_by: string | null;
   updated_at: string | null;
+}
+export interface SkillGrantDetail extends SkillGrant {
+  skill_id: string;
+  skill_name: string;
+  skill_status: "active" | "disabled";
+  visibility: "public" | "restricted";
+  agent_name: string;
+  changed_by_name: string | null;
 }
 export interface SkillPublicationRequest {
   id: string;

@@ -91,6 +91,35 @@ async def test_catalog_and_fixed_publication_transactions(skill_database, tmp_pa
         await service.import_existing(admin, preview)
         assert (await service.list_catalog(owner, "agentA"))["items"] == []
         item = (await repo.list_items())[0]
+        assert item["visibility"] == "restricted"
+        await service.set_item_visibility(admin, item["id"], "public")
+        assert [
+            row["name"] for row in (await service.list_catalog(user, "agentB"))["items"]
+        ] == ["sample"]
+        async with sessions() as session:
+            await repo.lock_lifecycle_authority(
+                session, "agentB", item["id"], actor=user
+            )
+        with pytest.raises(AuthorizationDeniedError):
+            await service.set_item_visibility(owner, item["id"], "public")
+        await service.set_item_status(admin, item["id"], False)
+        assert (await service.list_catalog(user, "agentB"))["items"] == []
+        await service.set_item_status(admin, item["id"], True)
+        await service.set_item_visibility(admin, item["id"], "restricted")
+        assert (await service.list_catalog(user, "agentB"))["items"] == []
+        with pytest.raises(AuthorizationDeniedError):
+            async with sessions() as session:
+                await repo.lock_lifecycle_authority(
+                    session, "agentB", item["id"], actor=user
+                )
+        await service.set_agent_grants(admin, item["id"], ["agentA", "agentB"], True)
+        assert len(await repo.list_grants(item["id"])) == 2
+        await service.set_agent_grants(admin, item["id"], ["agentA", "agentB"], False)
+        with pytest.raises(ValueError, match="skill_or_agent_not_found"):
+            await service.set_agent_grants(
+                admin, item["id"], ["agentA", "missing"], True
+            )
+        assert all(not row["enabled"] for row in await repo.list_grants(item["id"]))
         await service.set_agent_grant(admin, item["id"], "agentA", True)
         resolved = await service.require_agent_version(
             owner, "agentA", item["version_id"]
@@ -158,7 +187,7 @@ async def test_catalog_and_fixed_publication_transactions(skill_database, tmp_pa
                 await session.execute(
                     text(f'SELECT count(*) FROM "{schema}".skill_pool_agent_grants')
                 )
-            ).scalar_one() == 1
+            ).scalar_one() == 2
             assert (
                 await session.execute(
                     text(f'SELECT count(*) FROM "{schema}".skill_pool_versions')

@@ -49,7 +49,9 @@ function SkillPoolPage() {
   const marketView = searchParams.get("view") === "market";
   const tabParam = searchParams.get("tab");
   const activeTab =
-    tabParam === "published" || tabParam === "requests" ? tabParam : "skills";
+    tabParam === "published" || tabParam === "requests" || tabParam === "grants"
+      ? tabParam
+      : "skills";
 
   const changeTab = useCallback(
     (tab: string) => {
@@ -219,6 +221,7 @@ function SkillPoolPage() {
         items={[
           { key: "skills", label: t("skillGovernance.skillsTab") },
           { key: "published", label: t("skillGovernance.publishedTab") },
+          { key: "grants", label: t("skillGovernance.grantsTab") },
           { key: "requests", label: t("skillGovernance.requestsTab") },
         ]}
       />
@@ -227,15 +230,14 @@ function SkillPoolPage() {
       <div className={styles.content}>
         {/* Toolbar */}
         {activeTab === "published" && <GovernancePanel view="published" />}
+        {activeTab === "grants" && <GovernancePanel view="grants" />}
         {activeTab === "requests" && <GovernancePanel view="requests" />}
         {activeTab === "skills" && pool.broadcastResults.length > 0 && (
           <Alert
             type="info"
             message={t("skillPool.broadcast")}
             description={pool.broadcastResults.map((row, index) => (
-              <p key={index}>
-                {pool.describeBroadcastResult(row)}
-              </p>
+              <p key={index}>{pool.describeBroadcastResult(row)}</p>
             ))}
           />
         )}

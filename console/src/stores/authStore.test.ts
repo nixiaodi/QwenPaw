@@ -152,6 +152,36 @@ describe("authStore multi-user lifecycle", () => {
     expect(useAgentStore.getState().lastChatIdByAgent).toEqual({});
   });
 
+  it("clears identity immediately while server logout is pending", async () => {
+    let finish!: (value: { revoked: boolean }) => void;
+    vi.mocked(authApi.logout).mockReturnValue(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+    );
+    useAuthStore.setState({ mode: "multi_user", phase: "authenticated", user });
+    const pending = useAuthStore.getState().logout();
+    expect(useAuthStore.getState().phase).toBe("anonymous");
+    expect(useAuthStore.getState().user).toBeNull();
+    finish({ revoked: true });
+    await pending;
+  });
+
+  it("keeps explicit logout anonymous when bootstrap runs again", async () => {
+    vi.mocked(authApi.logout).mockResolvedValue({ revoked: true });
+    useAuthStore.setState({ mode: "multi_user", phase: "authenticated", user });
+    await useAuthStore.getState().logout();
+    vi.mocked(authApi.getStatus).mockResolvedValue({
+      enabled: true,
+      has_users: true,
+      mode: "multi_user",
+    });
+    vi.mocked(authApi.refresh).mockClear();
+    await useAuthStore.getState().bootstrap();
+    expect(authApi.refresh).not.toHaveBeenCalled();
+    expect(useAuthStore.getState().phase).toBe("anonymous");
+  });
+
   it("logs out the current device and clears in-memory identity", async () => {
     vi.mocked(authApi.logout).mockResolvedValue({ revoked: true });
     useAuthStore.setState({

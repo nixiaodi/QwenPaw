@@ -68,6 +68,14 @@ class Enabled(StrictBody):
     enabled: bool
 
 
+class Visibility(StrictBody):
+    visibility: Literal["public", "restricted"]
+
+
+class AgentGrants(Enabled):
+    agent_ids: list[str] = Field(min_length=1, max_length=500)
+
+
 class Submission(StrictBody):
     agent_id: str
     skill_name: str
@@ -116,7 +124,9 @@ async def broadcast_skill(
         body.agent_ids,
         overwrite=body.overwrite,
         preview_only=body.preview_only,
-        confirmations={key: value.model_dump() for key, value in body.confirmations.items()},
+        confirmations={
+            key: value.model_dump() for key, value in body.confirmations.items()
+        },
     )
     for row in result["results"]:
         if row["status"] == "updated":
@@ -198,6 +208,39 @@ async def grants(skill_id: UUID, actor=Depends(require_manage)):
 
     names = {str(agent_database_id(key)): key for key in load_config().agents.profiles}
     rows = await get_skill_service().repository.list_grants(skill_id)
+    return {
+        "grants": [
+            {
+                **row,
+                "agent_database_id": str(row["agent_id"]),
+                "agent_id": names.get(str(row["agent_id"])),
+            }
+            for row in rows
+        ]
+    }
+
+
+@router.patch("/skill-governance/items/{skill_id}/visibility")
+async def visibility(skill_id: UUID, body: Visibility, actor=Depends(require_manage)):
+    return await get_skill_service().set_item_visibility(
+        actor, skill_id, body.visibility
+    )
+
+
+@router.put("/skill-governance/items/{skill_id}/agent-grants")
+async def batch_grant(skill_id: UUID, body: AgentGrants, actor=Depends(require_manage)):
+    return await get_skill_service().set_agent_grants(
+        actor, skill_id, body.agent_ids, body.enabled
+    )
+
+
+@router.get("/skill-governance/agent-grants")
+async def all_grants(actor=Depends(require_manage)):
+    from ...config.utils import load_config
+    from ...access.agent_repository import agent_database_id
+
+    names = {str(agent_database_id(key)): key for key in load_config().agents.profiles}
+    rows = await get_skill_service().repository.list_all_grants()
     return {
         "grants": [
             {

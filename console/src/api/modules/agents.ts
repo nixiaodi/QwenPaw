@@ -18,6 +18,7 @@ import type {
 import type { MemoryScope } from "../../features/files-workspace/filesWorkspaceScope";
 import { getApiUrl } from "../config";
 import { buildAuthHeaders } from "../authHeaders";
+import type { Message } from "../types/chat";
 import { downloadFileFromUrl } from "../../utils/downloadFileFromUrl";
 
 export interface PortableAgentImportResponse {
@@ -62,6 +63,26 @@ export interface ReMeMemoryStatusResponse {
 export type ReMeMemoryRuntimeStatus = ReMeMemoryStatusResponse["runtime"];
 
 // Multi-agent management API
+export interface AdminConversation {
+  id: string;
+  owner_user_id: string;
+  owner_name: string;
+  title: string;
+  status: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AdminConversationMessage {
+  id: string;
+  role: string;
+  sequence: number;
+  message_type: string;
+  content: Record<string, unknown>;
+  status: string;
+  created_at: string;
+}
+
 export const agentsApi = {
   // List all agents
   listAgents: () => request<AgentListResponse>("/agents"),
@@ -243,6 +264,28 @@ export const agentsApi = {
 
   listAdminAgents: () =>
     request<{ agents: AdminAgentSummary[] }>("/admin/agents"),
+
+  listAdminConversations: (agentId: string, signal?: AbortSignal) =>
+    request<{ conversations: AdminConversation[] }>(
+      `/admin/agents/${encodeURIComponent(agentId)}/conversations`,
+      { signal },
+    ),
+
+  getAdminConversation: (
+    agentId: string,
+    conversationId: string,
+    signal?: AbortSignal,
+  ) =>
+    request<{
+      messages: AdminConversationMessage[];
+      history_messages: Message[];
+      read_only: true;
+    }>(
+      `/admin/agents/${encodeURIComponent(
+        agentId,
+      )}/conversations/${encodeURIComponent(conversationId)}`,
+      { signal },
+    ),
 
   setPublication: (agentId: string, published: boolean) =>
     request<{ success: boolean; visibility: AdminAgentSummary["visibility"] }>(

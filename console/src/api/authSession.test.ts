@@ -88,4 +88,15 @@ describe("authSession", () => {
     expect(await refreshing).toBe(true);
     expect(authApi.refresh).toHaveBeenCalledTimes(2);
   });
+
+  it("does not restore identity after logout during account verification", async () => {
+    vi.mocked(authApi.refresh).mockResolvedValue({ token: "fresh", username: "admin" });
+    let finish!: (value: string) => void;
+    const identify = vi.fn(() => new Promise<string>((resolve) => { finish = resolve; }));
+    const restoring = restoreAccessSession(identify);
+    await vi.waitFor(() => expect(identify).toHaveBeenCalledOnce());
+    clearAccessSession();
+    finish("stale identity");
+    await expect(restoring).rejects.toThrow("Authentication context changed");
+  });
 });

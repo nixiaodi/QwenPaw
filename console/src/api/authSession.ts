@@ -134,6 +134,8 @@ export function restoreAccessSession<T>(identify: () => Promise<T>) {
     // Keep identity verification inside the same origin lock: another tab's
     // rotation must not invalidate this access token before /me completes.
     const identity = await identify();
+    if (generation !== sessionGeneration)
+      throw new Error("Authentication context changed");
     return { response, identity };
   });
 }

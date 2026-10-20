@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
   Button,
-  Card,
   Input,
   Modal,
   Select,
@@ -19,7 +18,7 @@ import { useSkillScope } from "@/api/skillScope";
 import type { AdminAgentSummary } from "@/api/types/agents";
 import type {
   GovernedSkill,
-  SkillGrant,
+  SkillGrantDetail,
   SkillPublicationRequest,
   SkillRequestDetail,
 } from "@/api/types/skillGovernance";
@@ -28,7 +27,7 @@ import {
   useSkillRuntime,
 } from "../../Agent/Skills/useSkillRuntime";
 
-export type GovernanceView = "published" | "requests";
+export type GovernanceView = "published" | "requests" | "grants";
 
 export default function GovernancePanel({ view }: { view: GovernanceView }) {
   const scope = useSkillScope();
@@ -45,8 +44,10 @@ function Panel({ view }: { view: GovernanceView }) {
   const [requestStatus, setRequestStatus] = useState("all");
   const [agents, setAgents] = useState<AdminAgentSummary[]>([]);
   const [grantItem, setGrantItem] = useState<GovernedSkill | null>(null);
-  const [grants, setGrants] = useState<SkillGrant[]>([]);
-  const [target, setTarget] = useState<string>();
+  const [grants, setGrants] = useState<SkillGrantDetail[]>([]);
+  const [targets, setTargets] = useState<string[]>([]);
+  const [grantSearch, setGrantSearch] = useState("");
+  const [grantStatus, setGrantStatus] = useState("all");
   const [publication, setPublication] =
     useState<SkillPublicationRequest | null>(null);
   const [detail, setDetail] = useState<SkillRequestDetail | null>(null);
@@ -59,10 +60,14 @@ function Panel({ view }: { view: GovernanceView }) {
   const [error, setError] = useState("");
   const detailSequence = useRef(0);
   const fileSequence = useRef(0);
-  const grantSequence = useRef(0);
 
   const refresh = useCallback(async () => {
     scope.assert();
+    if (view === "grants") {
+      const response = await api.allGrants();
+      if (scope.current()) setGrants(response.grants);
+      return;
+    }
     if (view === "published") {
       const [registered, targets] = await Promise.all([
         api.items(),
@@ -102,29 +107,17 @@ function Panel({ view }: { view: GovernanceView }) {
   }, [refresh, scope, t]);
 
   const openGrants = async (item: GovernedSkill) => {
-    const sequence = ++grantSequence.current;
     setGrantItem(item);
-    setGrants([]);
-    setTarget(undefined);
-    try {
-      const response = await api.grants(item.id);
-      if (scope.current() && sequence === grantSequence.current)
-        setGrants(response.grants);
-    } catch (loadError) {
-      if (scope.current() && sequence === grantSequence.current)
-        setError(skillErrorMessage(loadError, t));
-    }
+    setTargets([]);
+    setError("");
   };
 
-  const setGrant = (agentId: string, enabled: boolean) => {
-    if (!grantItem) return;
-    const id = grantItem.id;
-    const sequence = grantSequence.current;
+  const submitGrants = () => {
+    if (!grantItem || !targets.length) return;
     void run(async () => {
-      await api.grant(id, agentId, enabled);
+      await api.grantMany(grantItem.id, targets, true);
       scope.assert();
-      const response = await api.grants(id);
-      if (sequence === grantSequence.current) setGrants(response.grants);
+      setGrantItem(null);
     });
   };
 
@@ -207,6 +200,108 @@ function Panel({ view }: { view: GovernanceView }) {
     (detail?.status ?? publication?.status) === "pending";
   const errorAlert = error && <Alert type="error" showIcon message={error} />;
 
+  if (view === "grants") {
+    const query = grantSearch.trim().toLowerCase();
+    return (
+      <Space direction="vertical" style={{ width: "100%" }} size="middle">
+        <Alert
+          type="info"
+          showIcon
+          message={t("skillGovernance.grantsDescription")}
+        />
+        {errorAlert}
+        <Space wrap>
+          <Input.Search
+            aria-label={t("skillGovernance.grantSearch")}
+            placeholder={t("skillGovernance.grantSearch")}
+            value={grantSearch}
+            onChange={(event) => setGrantSearch(event.target.value)}
+            allowClear
+          />
+          <Select
+            value={grantStatus}
+            onChange={setGrantStatus}
+            options={[
+              { value: "all", label: t("skillGovernance.statusAll") },
+              { value: "enabled", label: t("common.enabled") },
+              { value: "disabled", label: t("common.disabled") },
+            ]}
+          />
+          <Button disabled={busy} onClick={() => void run(refresh, false)}>
+            {t("common.refresh")}
+          </Button>
+        </Space>
+        <Table
+          rowKey={(row) => `${row.skill_id}:${row.agent_database_id}`}
+          pagination={{ pageSize: 10 }}
+          scroll={{ x: true }}
+          dataSource={grants.filter(
+            (row) =>
+              (!query ||
+                `${row.skill_name} ${row.agent_name} ${row.agent_id ?? ""}`
+                  .toLowerCase()
+                  .includes(query)) &&
+              (grantStatus === "all" ||
+                row.enabled === (grantStatus === "enabled")),
+          )}
+          columns={[
+            { title: t("skills.skillName"), dataIndex: "skill_name" },
+            {
+              title: t("skillGovernance.selectAgent"),
+              render: (_, row) =>
+                row.agent_name ||
+                row.agent_id ||
+                t("skillGovernance.missingAgent"),
+            },
+            {
+              title: t("skillGovernance.access"),
+              render: (_, row) =>
+                t(
+                  row.visibility === "public"
+                    ? "skillGovernance.public"
+                    : "skillGovernance.restricted",
+                ),
+            },
+            {
+              title: t("skillGovernance.active"),
+              render: (_, row) =>
+                t(row.enabled ? "common.enabled" : "common.disabled"),
+            },
+            {
+              title: t("skillGovernance.changedBy"),
+              dataIndex: "changed_by_name",
+            },
+            {
+              title: t("skillGovernance.changedAt"),
+              dataIndex: "updated_at",
+              render: (value: string | null) =>
+                value ? new Date(value).toLocaleString() : "—",
+            },
+            {
+              title: t("common.actions"),
+              render: (_, row) => (
+                <Button
+                  disabled={busy || !row.agent_id}
+                  onClick={() =>
+                    void run(() =>
+                      api.grant(row.skill_id, row.agent_id!, !row.enabled),
+                    )
+                  }
+                >
+                  {t(
+                    row.enabled
+                      ? "skillGovernance.revoke"
+                      : "skillGovernance.grant",
+                  )}
+                </Button>
+              ),
+            },
+          ]}
+        />
+      </Space>
+    );
+  }
+
   if (view === "published") {
     return (
       <Space direction="vertical" style={{ width: "100%" }} size="middle">
@@ -251,6 +346,24 @@ function Panel({ view }: { view: GovernanceView }) {
               ),
             },
             {
+              title: t("skillGovernance.public"),
+              render: (_, row) => (
+                <Switch
+                  aria-label={`${row.name} ${t("skillGovernance.public")}`}
+                  checked={row.visibility === "public"}
+                  disabled={busy}
+                  onChange={(enabled) =>
+                    void run(() =>
+                      api.setVisibility(
+                        row.id,
+                        enabled ? "public" : "restricted",
+                      ),
+                    )
+                  }
+                />
+              ),
+            },
+            {
               title: t("common.actions"),
               render: (_, row) => (
                 <Button disabled={busy} onClick={() => void openGrants(row)}>
@@ -260,56 +373,39 @@ function Panel({ view }: { view: GovernanceView }) {
             },
           ]}
         />
-        {grantItem && (
-          <Card
-            size="small"
-            title={`${grantItem.name} · ${t("skillGovernance.grants")}`}
-          >
-            <Space wrap>
-              <Select
-                aria-label={t("skillGovernance.selectAgent")}
-                placeholder={t("skillGovernance.selectAgent")}
-                style={{ minWidth: 240 }}
-                value={target}
-                onChange={setTarget}
-                disabled={busy}
-                options={agents.map((agent) => ({
-                  value: agent.id,
-                  label: agent.name || agent.id,
-                }))}
-              />
-              <Button
-                disabled={busy || !target}
-                onClick={() => target && setGrant(target, true)}
-              >
-                {t("skillGovernance.grant")}
-              </Button>
-            </Space>
-            {grants.map((grant) => (
-              <div key={grant.agent_database_id}>
-                <span>
-                  {grant.agent_id ?? t("skillGovernance.missingAgent")}
-                </span>
-                {" · "}
-                <span>
-                  {grant.enabled ? t("common.enabled") : t("common.disabled")}
-                </span>{" "}
-                <Button
-                  disabled={busy || !grant.agent_id}
-                  onClick={() =>
-                    grant.agent_id && setGrant(grant.agent_id, !grant.enabled)
-                  }
-                >
-                  {t(
-                    grant.enabled
-                      ? "skillGovernance.revoke"
-                      : "skillGovernance.grant",
-                  )}
-                </Button>
-              </div>
-            ))}
-          </Card>
-        )}
+        <Modal
+          open={!!grantItem}
+          title={`${grantItem?.name ?? ""} · ${t("skillGovernance.grants")}`}
+          destroyOnHidden
+          onCancel={() => !busy && setGrantItem(null)}
+          onOk={submitGrants}
+          confirmLoading={busy}
+          okText={t("skillGovernance.grant")}
+          okButtonProps={{ disabled: !targets.length }}
+        >
+          {errorAlert}
+          <p>{t("skillGovernance.grantHelp")}</p>
+          <Select
+            mode="multiple"
+            showSearch
+            optionFilterProp="label"
+            style={{ width: "100%" }}
+            aria-label={t("skillGovernance.selectAgent")}
+            placeholder={t("skillGovernance.selectAgent")}
+            value={targets}
+            onChange={setTargets}
+            disabled={busy}
+            options={agents
+              .filter(
+                (agent) =>
+                  agent.status === undefined || agent.status === "active",
+              )
+              .map((agent) => ({
+                value: agent.id,
+                label: agent.name || agent.id,
+              }))}
+          />
+        </Modal>
       </Space>
     );
   }

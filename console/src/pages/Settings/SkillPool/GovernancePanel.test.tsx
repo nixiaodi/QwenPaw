@@ -45,6 +45,7 @@ beforeEach(async () => {
       return {
         agents: [
           { id: "not-in-store", name: "Other owner's Agent", enabled: true },
+          { id: "another-agent", name: "Second Agent", enabled: true },
         ],
       };
     if (url.endsWith("/initialization/preview"))
@@ -96,7 +97,7 @@ afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
 });
-const renderPanel = (view: "published" | "requests" = "published") =>
+const renderPanel = (view: "published" | "requests" | "grants" = "published") =>
   renderWithProviders(
     <ConfigProvider theme={{ token: { motion: false } }}>
       <GovernancePanel view={view} />
@@ -148,6 +149,7 @@ it("reviews the displayed immutable files with the displayed expected version", 
 it("offers administrator Agent targets beyond the current user's store without auto-granting", async () => {
   renderPanel("published");
   fireEvent.click(await screen.findByRole("button", { name: label("grants") }));
+  expect(await screen.findByRole("dialog")).toBeInTheDocument();
   const select = await screen.findByRole("combobox", {
     name: label("selectAgent"),
   });
@@ -157,9 +159,9 @@ it("offers administrator Agent targets beyond the current user's store without a
   fireEvent.click(screen.getByRole("button", { name: label("grant") }));
   await waitFor(() =>
     expect(calls.find((c) => c.method === "PUT")).toEqual({
-      url: "/api/skill-governance/items/skill-1/agent-grants/not-in-store",
+      url: "/api/skill-governance/items/skill-1/agent-grants",
       method: "PUT",
-      body: { enabled: true },
+      body: { enabled: true, agent_ids: ["not-in-store"] },
     }),
   );
 });
@@ -173,6 +175,38 @@ it("does not fetch administrator data for an ordinary user", () => {
   expect(
     screen.queryByRole("button", { name: label("grants") }),
   ).not.toBeInTheDocument();
+});
+
+it("grants multiple selected Agents in one request", async () => {
+  renderPanel("published");
+  fireEvent.click(await screen.findByRole("button", { name: label("grants") }));
+  const select = await screen.findByRole("combobox", {
+    name: label("selectAgent"),
+  });
+  fireEvent.mouseDown(select);
+  fireEvent.click(await screen.findByText("Other owner's Agent"));
+  fireEvent.click(await screen.findByText("Second Agent"));
+  fireEvent.click(screen.getByRole("button", { name: label("grant") }));
+  await waitFor(() =>
+    expect(calls.find((c) => c.method === "PUT")?.body).toEqual({
+      agent_ids: ["not-in-store", "another-agent"],
+      enabled: true,
+    }),
+  );
+  expect(calls.filter((c) => c.method === "PUT")).toHaveLength(1);
+});
+
+it("sets public access independently of Agent grants", async () => {
+  renderPanel("published");
+  fireEvent.click(
+    await screen.findByRole("switch", { name: `published ${label("public")}` }),
+  );
+  await waitFor(() =>
+    expect(calls.find((c) => c.url.endsWith("/visibility"))?.body).toEqual({
+      visibility: "public",
+    }),
+  );
+  expect(calls.some((c) => c.method === "PUT")).toBe(false);
 });
 
 it("discards administrator data that resolves after an account switch", async () => {
@@ -276,6 +310,9 @@ it("changes active status and revokes an explicit Agent grant without deleting a
       ? {
           grants: [
             {
+              skill_id: "skill-1",
+              skill_name: "published",
+              agent_name: "Other owner's Agent",
               agent_id: "not-in-store",
               agent_database_id: "db-id",
               enabled: true,
@@ -283,9 +320,9 @@ it("changes active status and revokes an explicit Agent grant without deleting a
           ],
         }
       : normal(url, init);
-  renderPanel("published");
+  const { unmount } = renderPanel("published");
   fireEvent.click(
-    await screen.findByRole("switch", { name: new RegExp("published") }),
+    await screen.findByRole("switch", { name: `published ${label("active")}` }),
   );
   await waitFor(() =>
     expect(calls.some((c) => c.url.endsWith("/status"))).toBe(true),
@@ -293,7 +330,8 @@ it("changes active status and revokes an explicit Agent grant without deleting a
   await waitFor(() =>
     expect(screen.getByRole("button", { name: label("grants") })).toBeEnabled(),
   );
-  fireEvent.click(screen.getByRole("button", { name: label("grants") }));
+  unmount();
+  renderPanel("grants");
   fireEvent.click(await screen.findByRole("button", { name: label("revoke") }));
   await waitFor(() =>
     expect(

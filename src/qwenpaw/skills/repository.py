@@ -25,12 +25,14 @@ class PostgresSkillRepository:
         rows = (
             (
                 await session.execute(
-                    text(f"""
+                    text(
+                        f"""
             SELECT a.*,v.skill_id,v.version AS source_pool_version,v.content_hash AS source_content_hash
             FROM {self.table('agent_skills')} a
             LEFT JOIN {self.table('skill_pool_versions')} v ON v.id=a.source_pool_version_id
             WHERE a.agent_id=:agent
-        """),
+        """
+                    ),
                     {"agent": agent_database_id(agent_id)},
                 )
             )
@@ -108,7 +110,7 @@ class PostgresSkillRepository:
             (
                 await session.execute(
                     text(
-                        f"SELECT name,status,current_version_id FROM {self.table('skill_pool_items')} WHERE id=:skill FOR SHARE"
+                        f"SELECT name,status,visibility,current_version_id FROM {self.table('skill_pool_items')} WHERE id=:skill FOR SHARE"
                     ),
                     {"skill": UUID(str(skill_id))},
                 )
@@ -124,20 +126,26 @@ class PostgresSkillRepository:
                 {"skill": UUID(str(skill_id)), "agent": agent},
             )
         ).scalar_one_or_none()
-        if item is None or item["status"] != "active" or grant is not True:
+        if (
+            item is None
+            or item["status"] != "active"
+            or (item["visibility"] != "public" and grant is not True)
+        ):
             raise AuthorizationDeniedError()
         return dict(item)
 
     async def bind_installed(self, session, agent_id, name, version, enabled):
         await session.execute(
-            text(f"""
+            text(
+                f"""
             INSERT INTO {self.table('agent_skills')}
                 (id,agent_id,name,content_key,enabled,source_pool_version_id,detached)
             VALUES (:id,:agent,:name,:key,:enabled,:version,false)
             ON CONFLICT (agent_id,name) DO UPDATE SET
                 content_key=EXCLUDED.content_key,enabled=EXCLUDED.enabled,
                 source_pool_version_id=EXCLUDED.source_pool_version_id,detached=false,updated_at=now()
-        """),
+        """
+            ),
             {
                 "id": uuid4(),
                 "agent": agent_database_id(agent_id),
@@ -189,13 +197,15 @@ class PostgresSkillRepository:
         async with self.session_factory() as session:
             return (
                 await session.execute(
-                    text(f"""
+                    text(
+                        f"""
                 SELECT CASE WHEN a.owner_user_id=:user THEN 'owner' ELSE m.role END
                 FROM {self.table('agents')} a
                 JOIN {self.table('users')} u ON u.id=:user AND u.status='active'
                 LEFT JOIN {self.table('agent_members')} m ON m.agent_id=a.id AND m.user_id=:user AND m.revoked_at IS NULL
                 WHERE a.id=:agent AND a.status='active'
-            """),
+            """
+                    ),
                     {"user": user_id, "agent": agent_database_id(agent_id)},
                 )
             ).scalar_one_or_none()
@@ -205,17 +215,19 @@ class PostgresSkillRepository:
             condition = (
                 ""
                 if agent_id is None
-                else f"AND i.status='active' AND EXISTS (SELECT 1 FROM {self.table('skill_pool_agent_grants')} g WHERE g.skill_id=i.id AND g.agent_id=:agent AND g.enabled)"
+                else f"AND i.status='active' AND (i.visibility='public' OR EXISTS (SELECT 1 FROM {self.table('skill_pool_agent_grants')} g WHERE g.skill_id=i.id AND g.agent_id=:agent AND g.enabled))"
             )
             rows = (
                 (
                     await session.execute(
-                        text(f"""
-                SELECT i.id,i.name,i.status,v.id AS version_id,v.version,v.content_hash
+                        text(
+                            f"""
+                SELECT i.id,i.name,i.status,i.visibility,v.id AS version_id,v.version,v.content_hash
                 FROM {self.table('skill_pool_items')} i
                 JOIN {self.table('skill_pool_versions')} v ON v.id=i.current_version_id
                 WHERE true {condition} ORDER BY i.name
-            """),
+            """
+                        ),
                         (
                             {"agent": agent_database_id(agent_id)}
                             if agent_id is not None
@@ -327,34 +339,91 @@ class PostgresSkillRepository:
                 )
                 await self._audit(session, actor_id, "skill.import", version)
 
-    async def set_agent_grant(self, skill_id, agent_id, enabled, actor_id):
-        async with self.session_factory() as session:
-            active = (
-                await session.execute(
-                    text(
-                        f"SELECT id FROM {self.table('agents')} WHERE id=:agent AND status='active'"
-                    ),
-                    {"agent": agent_database_id(agent_id)},
+    async def set_agent_grant(
+        self, skill_id, agent_id, enabled, actor_id, *, session=None
+    ):
+        if session is None:
+            async with self.session_factory() as current:
+                return await self.set_agent_grant(
+                    skill_id, agent_id, enabled, actor_id, session=current
                 )
-            ).scalar_one_or_none()
-            item = (
-                await session.execute(
-                    text(
-                        f"SELECT id FROM {self.table('skill_pool_items')} WHERE id=:skill"
-                    ),
-                    {"skill": UUID(str(skill_id))},
-                )
-            ).scalar_one_or_none()
-            if active is None or item is None:
-                raise ValueError("skill_or_agent_not_found")
+        active = (
             await session.execute(
                 text(
-                    f"INSERT INTO {self.table('skill_pool_agent_grants')} (skill_id,agent_id,enabled,changed_by) VALUES (:skill,:agent,:enabled,:actor) ON CONFLICT (skill_id,agent_id) DO UPDATE SET enabled=EXCLUDED.enabled,changed_by=EXCLUDED.changed_by,updated_at=now()"
+                    f"SELECT id FROM {self.table('agents')} WHERE id=:agent AND status='active'"
                 ),
-                {"skill": item, "agent": active, "enabled": enabled, "actor": actor_id},
+                {"agent": agent_database_id(agent_id)},
             )
-            await self._audit(session, actor_id, "skill.grant", item)
+        ).scalar_one_or_none()
+        item = (
+            await session.execute(
+                text(
+                    f"SELECT id FROM {self.table('skill_pool_items')} WHERE id=:skill"
+                ),
+                {"skill": UUID(str(skill_id))},
+            )
+        ).scalar_one_or_none()
+        if active is None or item is None:
+            raise ValueError("skill_or_agent_not_found")
+        await session.execute(
+            text(
+                f"INSERT INTO {self.table('skill_pool_agent_grants')} (skill_id,agent_id,enabled,changed_by) VALUES (:skill,:agent,:enabled,:actor) ON CONFLICT (skill_id,agent_id) DO UPDATE SET enabled=EXCLUDED.enabled,changed_by=EXCLUDED.changed_by,updated_at=now()"
+            ),
+            {"skill": item, "agent": active, "enabled": enabled, "actor": actor_id},
+        )
+        await self._audit(session, actor_id, "skill.grant", item)
         return {"skill_id": str(item), "agent_id": agent_id, "enabled": enabled}
+
+    async def set_agent_grants(self, skill_id, agent_ids, enabled, actor_id):
+        async with self.session_factory() as session:
+            return {
+                "grants": [
+                    await self.set_agent_grant(
+                        skill_id, agent_id, enabled, actor_id, session=session
+                    )
+                    for agent_id in dict.fromkeys(agent_ids)
+                ]
+            }
+
+    async def list_all_grants(self):
+        async with self.session_factory() as session:
+            rows = (
+                (
+                    await session.execute(
+                        text(
+                            f"""
+                SELECT g.*, i.name AS skill_name, i.status AS skill_status, i.visibility,
+                       a.name AS agent_name, u.username AS changed_by_name
+                FROM {self.table('skill_pool_agent_grants')} g
+                JOIN {self.table('skill_pool_items')} i ON i.id=g.skill_id
+                JOIN {self.table('agents')} a ON a.id=g.agent_id
+                LEFT JOIN {self.table('users')} u ON u.id=g.changed_by
+                ORDER BY g.updated_at DESC, i.name, a.name
+            """
+                        )
+                    )
+                )
+                .mappings()
+                .all()
+            )
+            return [dict(row) for row in rows]
+
+    async def set_item_visibility(self, skill_id, visibility, actor_id):
+        if visibility not in {"public", "restricted"}:
+            raise ValueError("invalid_skill_visibility")
+        async with self.session_factory() as session:
+            row = (
+                await session.execute(
+                    text(
+                        f"UPDATE {self.table('skill_pool_items')} SET visibility=:visibility,updated_at=now() WHERE id=:id RETURNING id"
+                    ),
+                    {"id": UUID(str(skill_id)), "visibility": visibility},
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                raise ValueError("skill_not_found")
+            await self._audit(session, actor_id, "skill.visibility", row)
+        return {"id": str(row), "visibility": visibility}
 
     async def list_grants(self, skill_id):
         async with self.session_factory() as session:

@@ -559,7 +559,7 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
         try {
           await logout();
         } finally {
-          window.location.href = "/login";
+          navigate("/login", { replace: true });
         }
       },
     });

@@ -65,6 +65,8 @@ const initialState = {
   accessToken: "",
 };
 
+const EXPLICIT_LOGOUT_KEY = "qwenpaw:explicit-logout";
+
 const USER_SCOPED_STORAGE_KEYS = new Set([
   "qwenpaw-agent-storage",
   "qwenpaw-last-used-agent",
@@ -165,6 +167,9 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
         return;
       }
       if (mode === "multi_user") {
+        if (localStorage.getItem(EXPLICIT_LOGOUT_KEY)) {
+          throw new Error("Explicitly signed out");
+        }
         const { identity } = await restoreAccessSession(loadIdentity);
         adoptAuthenticatedUser(identity.user.id);
         set({
@@ -192,6 +197,7 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
   login: async (username, password) => {
     const { response, identity } = await withSessionRefreshLock(async () => {
       const response = await authApi.login(username, password);
+      localStorage.removeItem(EXPLICIT_LOGOUT_KEY);
       setApiAuthMode(get().mode);
       adoptAccessSession(response);
       const identity =
@@ -215,6 +221,7 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
   register: async (username, password) => {
     const { response, identity } = await withSessionRefreshLock(async () => {
       const response = await authApi.register(username, password);
+      localStorage.removeItem(EXPLICIT_LOGOUT_KEY);
       setApiAuthMode(get().mode);
       adoptAccessSession(response);
       const identity =
@@ -232,7 +239,9 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
 
   logout: async () => {
     if (get().mode === "multi_user") {
-      await withSessionRefreshLock(() => authApi.logout());
+      localStorage.setItem(EXPLICIT_LOGOUT_KEY, "1");
+      // Keep cookie revocation ordered with refresh/login without blocking the UI.
+      void withSessionRefreshLock(() => authApi.logout()).catch(() => {});
     }
     clearAccessSession();
     resetUserScopedClientState();

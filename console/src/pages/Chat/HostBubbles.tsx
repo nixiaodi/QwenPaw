@@ -144,11 +144,13 @@ function DefaultHostResponseCard({
   isLast,
   contentPrepend,
   contentAppend,
+  readOnly = false,
 }: {
   data: IAgentScopeRuntimeResponse;
   isLast?: boolean;
   contentPrepend?: React.ReactNode;
   contentAppend?: React.ReactNode;
+  readOnly?: boolean;
 }) {
   const avatar = useChatAnywhereOptions((options) => options.welcome?.avatar);
   const nick = useChatAnywhereOptions((options) => options.welcome?.nick);
@@ -187,7 +189,7 @@ function DefaultHostResponseCard({
           case AgentScopeRuntimeMessageType.MCP_CALL_OUTPUT:
             return <ResponseTool key={itemKey} data={item} />;
           case AgentScopeRuntimeMessageType.MCP_APPROVAL_REQUEST:
-            return <ResponseTool key={itemKey} data={item} isApproval />;
+            return <ResponseTool key={itemKey} data={item} isApproval={!readOnly} />;
           case AgentScopeRuntimeMessageType.REASONING:
             return <ResponseReasoning key={itemKey} data={item} />;
           case AgentScopeRuntimeMessageType.ERROR:
@@ -201,7 +203,7 @@ function DefaultHostResponseCard({
       })}
       {data.error ? <ResponseError data={data.error} /> : null}
       {contentAppend}
-      <ResponseActions data={data} isLast={isLast} />
+      {!readOnly && <ResponseActions data={data} isLast={isLast} />}
     </ToolResponseStatusContext.Provider>
   );
 }
@@ -210,6 +212,21 @@ function RequestContent({ data, mediaOnly = false }: { data: IAgentScopeRuntimeR
   return <>{data.input[0].content.filter(item => !mediaOnly || item.type !== "text").map((item, index) => item.type === "text"
     ? <TranscriptText key={index} text={item.text || ""} />
     : <HostMessage key={index} data={{role: "user", content: [item]} as IAgentScopeRuntimeMessage} />)}</>;
+}
+
+/** Read-only history uses the same content renderers without editing or run actions. */
+export function ReadOnlyRequestCard({ data }: { data: IAgentScopeRuntimeRequest }) {
+  return <Bubble role="user" cards={[{ code: "Text", component: RequestContent, data }]} />;
+}
+
+export function ReadOnlyResponseCard({ data }: { data: IAgentScopeRuntimeResponse }) {
+  return <Bubble role="assistant" cards={[{
+    code: "Response", component: ReadOnlyResponseContent, data,
+  }]} />;
+}
+
+function ReadOnlyResponseContent({ data }: { data: IAgentScopeRuntimeResponse }) {
+  return <DefaultHostResponseCard data={data} readOnly />;
 }
 
 export function HostRequestCard(props: { data: ChatRequestData }) {

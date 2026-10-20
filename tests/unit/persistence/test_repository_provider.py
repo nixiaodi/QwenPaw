@@ -44,7 +44,7 @@ async def _ready():
 
 
 def test_expected_revision_tracks_current_alembic_head() -> None:
-    assert _module().EXPECTED_SCHEMA_REVISION == "0020_agent_personal_library"
+    assert _module().EXPECTED_SCHEMA_REVISION == "0021_skill_public_admin_read"
 
 
 @pytest.mark.asyncio

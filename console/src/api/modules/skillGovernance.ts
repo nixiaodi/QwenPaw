@@ -3,6 +3,7 @@ import type {
   GovernedSkill,
   SkillCatalogItem,
   SkillGrant,
+  SkillGrantDetail,
   SkillPreview,
   SkillPublicationRequest,
   SkillRequestDetail,
@@ -78,6 +79,12 @@ export function createSkillGovernanceApi(scope: SkillScope) {
       }),
     grants: (id: string) =>
       call<{ grants: SkillGrant[] }>(`${item(id)}/agent-grants`),
+    allGrants: () =>
+      call<{ grants: SkillGrantDetail[] }>(`${governance}/agent-grants`),
+    setVisibility: (id: string, visibility: "public" | "restricted") =>
+      call(`${item(id)}/visibility`, "PATCH", { visibility }),
+    grantMany: (id: string, agentIds: string[], enabled: boolean) =>
+      call(`${item(id)}/agent-grants`, "PUT", { agent_ids: agentIds, enabled }),
     grant: (id: string, agentId: string, enabled: boolean) =>
       call(`${item(id)}/agent-grants/${encodeURIComponent(agentId)}`, "PUT", {
         enabled,

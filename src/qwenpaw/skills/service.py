@@ -94,6 +94,18 @@ class SkillGovernanceService:
         self.require_manage(actor)
         return await self.repository.set_item_status(skill_id, enabled, actor.user_id)
 
+    async def set_item_visibility(self, actor, skill_id, visibility):
+        self.require_manage(actor)
+        return await self.repository.set_item_visibility(
+            skill_id, visibility, actor.user_id
+        )
+
+    async def set_agent_grants(self, actor, skill_id, agent_ids, enabled):
+        self.require_manage(actor)
+        return await self.repository.set_agent_grants(
+            skill_id, agent_ids, enabled, actor.user_id
+        )
+
     async def submit_request(self, actor, agent_id, skill_name, source):
         await self.require_agent_editor(actor, agent_id, owner_only=True)
         snapshot = self.snapshots.capture(source, validate_name(skill_name))

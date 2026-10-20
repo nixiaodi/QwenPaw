@@ -1,0 +1,45 @@
+.surface {
+  min-height: 100%;
+  background: var(--qwenpaw-color-fill-tertiary);
+}
+
+.timeline {
+  width: 100%;
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 24px 32px 48px;
+}
+
+.userTurn,
+.assistantTurn {
+  margin-bottom: 32px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.userTurn {
+  margin-left: 12%;
+
+  .caption {
+    justify-content: flex-end;
+  }
+}
+
+.caption {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 10px;
+  font-size: 12px;
+}
+
+@media (max-width: 768px) {
+  .timeline {
+    padding: 20px 16px;
+  }
+
+  .caption {
+    flex-wrap: wrap;
+    gap: 4px 8px;
+  }
+}

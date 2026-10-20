@@ -18,6 +18,8 @@ import { ChannelIcon } from "../Channels/components";
 import styles from "./index.module.less";
 import { inspectSessionForView } from "./viewSession";
 import ConversationShareDialog from "../../Chat/components/ConversationShareDialog";
+import { useAuthStore } from "@/stores/authStore";
+import AdminConversations from "./AdminConversations";
 
 function SessionsPage() {
   const { t } = useTranslation();
@@ -474,4 +476,27 @@ function SessionsPage() {
   );
 }
 
-export default SessionsPage;
+export default function SessionsPageContainer() {
+  const { t } = useTranslation();
+  const auth = useAuthStore();
+  const [view, setView] = useState("mine");
+  const isAdmin =
+    auth.mode === "multi_user" &&
+    auth.phase === "authenticated" &&
+    auth.user?.platform_role === "admin";
+  if (!isAdmin) return <SessionsPage />;
+  return (
+    <div>
+      <Tabs
+        activeKey={view}
+        onChange={setView}
+        style={{ padding: "0 16px" }}
+        items={[
+          { key: "mine", label: t("sessions.myConversations") },
+          { key: "inspect", label: t("sessions.adminInspect") },
+        ]}
+      />
+      {view === "inspect" ? <AdminConversations /> : <SessionsPage />}
+    </div>
+  );
+}

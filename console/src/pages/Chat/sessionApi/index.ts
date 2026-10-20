@@ -331,7 +331,7 @@ const buildResponseCard = (
  * - Consecutive non-user messages (assistant / system / tool) → grouped
  *   into a single AgentScopeRuntimeResponseCard with all output messages.
  */
-const convertMessages = (
+export const convertMessages = (
   messages: Message[],
   generating = false,
 ): IAgentScopeRuntimeWebUIMessage[] => {

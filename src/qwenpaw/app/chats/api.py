@@ -65,52 +65,14 @@ async def _load_postgres_history_messages(
     if repository is None:
         raise RuntimeError("conversation_repository_unavailable")
     records = await repository.with_user(user_id).list_messages(conversation_id)
-    projected: list[Message] = []
-    for record in records:
-        if record.status == "superseded":
-            continue
-        try:
-            stored_content = record.content
-            if isinstance(stored_content.get("qwenpaw_payload_ref"), dict):
-                persistence = getattr(manager, "run_persistence", None)
-                loader = getattr(persistence, "load_event_payload", None)
-                if loader is None:
-                    raise RuntimeError("chat_event_payload_loader_unavailable")
-                stored_content = await loader(stored_content)
-            if record.message_type == "legacy_snapshot":
-                if record.role == "user":
-                    from .user_content import user_content_parts
-                    projected.append(Message.model_validate({
-                        "id": str(record.id), "type": "message", "role": "user",
-                        "status": record.status, "content": user_content_parts(record),
-                        "metadata": {"timestamp": record.created_at.isoformat(),
-                                     "metadata": record.content.get("metadata") or {},
-                                     "qwenpaw_editable": True},
-                    }))
-                    continue
-                projected.extend(
-                    agentscope_msg_to_message(Msg.model_validate(stored_content))
-                )
-                continue
-            payload = {
-                "id": str(record.id),
-                "type": record.message_type,
-                "role": record.role,
-                "status": record.status,
-                **stored_content,
-            }
-            if record.role == "user":
-                payload["metadata"] = {**(payload.get("metadata") or {}), "qwenpaw_editable": True}
-            projected.append(Message.model_validate(payload))
-        except Exception as exc:
-            logger.error(
-                "PostgreSQL message projection failed for conversation=%s sequence=%s",
-                conversation_id,
-                record.sequence,
-                exc_info=True,
-            )
-            raise RuntimeError("postgres_message_projection_failed") from exc
-    return projected
+    from .history import project_history_messages
+
+    persistence = getattr(manager, "run_persistence", None)
+    return await project_history_messages(
+        records,
+        conversation_id=conversation_id,
+        load_payload=getattr(persistence, "load_event_payload", None),
+    )
 
 
 def _protect_history_attachment_urls(

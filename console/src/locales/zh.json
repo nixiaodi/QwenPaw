@@ -3642,6 +3642,8 @@
     }
   },
   "login": {
+    "sessionCheckFailed": "暂时无法验证登录状态，请检查网络后重试。",
+    "retrySession": "重试",
     "title": "登录 WeldonAgent",
     "registerTitle": "创建账户",
     "firstUserHint": "创建管理员账户以开始使用",

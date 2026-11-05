@@ -20,6 +20,7 @@ vi.mock("../api/modules/auth", () => ({
 import { authApi } from "../api/modules/auth";
 import { getApiToken } from "../api/config";
 import { clearAccessSession } from "../api/authSession";
+import { AuthResponseError } from "../api/authErrors";
 import { useAgentStore } from "./agentStore";
 import { useAuthStore } from "./authStore";
 import { useBackgroundTasksStore } from "./backgroundTasksStore";
@@ -68,6 +69,99 @@ describe("authStore multi-user lifecycle", () => {
     vi.clearAllMocks();
     localStorage.clear();
     useAuthStore.getState().reset();
+  });
+
+  it("coalesces bootstrap callers so a page only rotates its cookie once", async () => {
+    vi.mocked(authApi.getStatus).mockResolvedValue({
+      enabled: true,
+      has_users: true,
+      mode: "multi_user",
+    });
+    vi.mocked(authApi.refresh).mockResolvedValue(loginResponse);
+    vi.mocked(authApi.getMe).mockResolvedValue({
+      user,
+      preferences: { language: "zh", timezone: "Asia/Shanghai" },
+    });
+    await Promise.all([
+      useAuthStore.getState().bootstrap(),
+      useAuthStore.getState().bootstrap(),
+    ]);
+    expect(authApi.getStatus).toHaveBeenCalledOnce();
+    expect(authApi.refresh).toHaveBeenCalledOnce();
+    expect(useAuthStore.getState().phase).toBe("authenticated");
+  });
+
+  it("shows a retry state rather than signing out on temporary bootstrap failure", async () => {
+    vi.mocked(authApi.getStatus).mockResolvedValue({
+      enabled: true,
+      has_users: true,
+      mode: "multi_user",
+    });
+    vi.mocked(authApi.refresh).mockRejectedValueOnce(
+      new AuthResponseError("unavailable", 503),
+    );
+    localStorage.setItem("qwenpaw_chat_input_draft_current", "unsent draft");
+    await useAuthStore.getState().bootstrap();
+    expect(useAuthStore.getState().phase).toBe("loading");
+    expect(useAuthStore.getState().bootstrapError).toBe(true);
+    expect(localStorage.getItem("qwenpaw_chat_input_draft_current")).toBe(
+      "unsent draft",
+    );
+    vi.mocked(authApi.refresh).mockResolvedValue(loginResponse);
+    vi.mocked(authApi.getMe).mockResolvedValue({
+      user,
+      preferences: { language: "zh", timezone: "Asia/Shanghai" },
+    });
+    await useAuthStore.getState().bootstrap();
+    expect(useAuthStore.getState().phase).toBe("authenticated");
+    expect(useAuthStore.getState().bootstrapError).toBe(false);
+  });
+
+  it("does not erase the renewed token when identity lookup temporarily fails", async () => {
+    vi.mocked(authApi.getStatus).mockResolvedValue({
+      enabled: true,
+      has_users: true,
+      mode: "multi_user",
+    });
+    vi.mocked(authApi.refresh).mockResolvedValue(loginResponse);
+    vi.mocked(authApi.getMe).mockRejectedValueOnce(
+      new TypeError("Failed to fetch"),
+    );
+    await useAuthStore.getState().bootstrap();
+    expect(useAuthStore.getState().phase).toBe("loading");
+    expect(useAuthStore.getState().bootstrapError).toBe(true);
+    expect(getApiToken()).toBe(loginResponse.token);
+  });
+
+  it("shows the login form for an explicitly expired refresh session", async () => {
+    vi.mocked(authApi.getStatus).mockResolvedValue({
+      enabled: true,
+      has_users: true,
+      mode: "multi_user",
+    });
+    vi.mocked(authApi.refresh).mockRejectedValueOnce(
+      new AuthResponseError("expired", 401),
+    );
+    await useAuthStore.getState().bootstrap();
+    expect(useAuthStore.getState().phase).toBe("anonymous");
+    expect(useAuthStore.getState().bootstrapError).toBe(false);
+  });
+
+  it("ignores a bootstrap response arriving after an explicit logout", async () => {
+    let finish!: (
+      status: Awaited<ReturnType<typeof authApi.getStatus>>,
+    ) => void;
+    vi.mocked(authApi.getStatus).mockReturnValueOnce(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+    );
+    const bootstrapping = useAuthStore.getState().bootstrap();
+    await useAuthStore.getState().logout();
+    finish({ enabled: true, has_users: true, mode: "multi_user" });
+    await bootstrapping;
+    expect(useAuthStore.getState().phase).toBe("anonymous");
+    expect(authApi.refresh).not.toHaveBeenCalled();
   });
 
   it("restores a multi-user login through the HttpOnly refresh cookie", async () => {

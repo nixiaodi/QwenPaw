@@ -3784,6 +3784,8 @@
     }
   },
   "login": {
+    "sessionCheckFailed": "Unable to verify your session right now. Check your connection and retry.",
+    "retrySession": "Retry",
     "title": "Login to WeldonAgent",
     "registerTitle": "Create Account",
     "firstUserHint": "Create your admin account to get started",

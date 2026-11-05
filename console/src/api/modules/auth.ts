@@ -1,4 +1,5 @@
 import { getApiToken, getApiUrl } from "../config";
+import { AuthResponseError } from "../authErrors";
 
 export type AuthMode = "legacy" | "multi_user";
 
@@ -65,7 +66,10 @@ function bearerHeaders(): Record<string, string> {
 
 async function detailError(res: Response, fallback: string): Promise<Error> {
   const err = await res.json().catch(() => ({}));
-  return new Error(err.detail || fallback);
+  return new AuthResponseError(
+    typeof err.detail === "string" ? err.detail : fallback,
+    res.status,
+  );
 }
 
 export const authApi = {
@@ -101,14 +105,17 @@ export const authApi = {
   },
 
   getStatus: async (): Promise<AuthStatusResponse> => {
-    const res = await fetch(getApiUrl("/auth/status"));
-    if (!res.ok) throw new Error("Failed to check auth status");
+    const res = await fetch(getApiUrl("/auth/status"), {
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!res.ok) throw await detailError(res, "Failed to check auth status");
     return res.json();
   },
 
   verify: async (): Promise<{ valid: boolean; username: string }> => {
     const res = await fetch(getApiUrl("/auth/verify"), {
       headers: bearerHeaders(),
+      signal: AbortSignal.timeout(10000),
     });
     if (!res.ok) throw await detailError(res, "Verification failed");
     return res.json();
@@ -120,7 +127,7 @@ export const authApi = {
       credentials: "include",
       signal: AbortSignal.timeout(10000),
     });
-    if (!res.ok) throw await detailError(res, "Session expired");
+    if (!res.ok) throw await detailError(res, "Unable to refresh session");
     return res.json();
   },
 
@@ -140,6 +147,7 @@ export const authApi = {
     const res = await fetch(getApiUrl("/me"), {
       headers: bearerHeaders(),
       credentials: "include",
+      signal: AbortSignal.timeout(10000),
     });
     if (!res.ok) throw await detailError(res, "Failed to load account");
     return res.json();

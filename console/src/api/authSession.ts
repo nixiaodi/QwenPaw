@@ -1,4 +1,10 @@
-import { clearAuthToken, getApiAuthMode, setAuthToken } from "./config";
+import {
+  clearAuthToken,
+  getApiAuthMode,
+  getApiToken,
+  setAuthToken,
+} from "./config";
+import { isAuthenticationRejected } from "./authErrors";
 import { authApi, type LoginResponse } from "./modules/auth";
 import {
   createSessionChannel,
@@ -12,6 +18,9 @@ let refreshPromise: Promise<boolean> | null = null;
 let refreshTimer: ReturnType<typeof setTimeout> | null = null;
 let sessionGeneration = 0;
 let sessionUserId = "";
+let refreshFailures = 0;
+let retryAfter = 0;
+let refreshError: unknown;
 const generationListeners = new Set<() => void>();
 const sessionListeners = new Set<(session: LoginResponse) => void>();
 
@@ -56,12 +65,22 @@ function cancelRefreshTimer(): void {
   }
 }
 
-function scheduleRefresh(): void {
+function scheduleRefresh(retryDelay?: number): void {
   cancelRefreshTimer();
   if (getApiAuthMode() !== "multi_user" || accessExpiresAt === 0) return;
-  const delay = Math.max(0, accessExpiresAt - Date.now() - REFRESH_MARGIN_MS);
+  const generation = sessionGeneration;
+  const delay =
+    retryDelay ??
+    Math.max(1000, accessExpiresAt - Date.now() - REFRESH_MARGIN_MS);
   refreshTimer = setTimeout(() => {
-    void refreshAccessSession();
+    refreshTimer = null;
+    void refreshAccessSession()
+      .then((renewed) => {
+        if (!renewed && generation === sessionGeneration) clearAccessSession();
+      })
+      .catch(() => {
+        /* A transient failure schedules its own bounded retry. */
+      });
   }, delay);
 }
 
@@ -78,6 +97,9 @@ export function adoptAccessSession(
   }
   sessionUserId = response.user?.id ?? sessionUserId;
   setAuthToken(response.token);
+  refreshFailures = 0;
+  retryAfter = 0;
+  refreshError = undefined;
   accessExpiresAt = parseExpiresAt(response.access_expires_at);
   scheduleRefresh();
   sessionListeners.forEach((listener) => listener(response));
@@ -91,29 +113,49 @@ export function clearAccessSession(broadcast = true): void {
   generationListeners.forEach((listener) => listener());
   accessExpiresAt = 0;
   refreshPromise = null;
+  refreshFailures = 0;
+  retryAfter = 0;
+  refreshError = undefined;
   cancelRefreshTimer();
   clearAuthToken();
   if (broadcast && getApiAuthMode() === "multi_user")
     getSessionChannel().publish({ type: "cleared" });
 }
 
-export async function refreshAccessSession(): Promise<boolean> {
+export async function refreshAccessSession(
+  rejectedToken?: string,
+): Promise<boolean> {
   if (getApiAuthMode() !== "multi_user") return false;
   if (refreshPromise) return refreshPromise;
+  if (Date.now() < retryAfter) throw refreshError;
 
   const generation = sessionGeneration;
+  const previousToken = rejectedToken ?? getApiToken();
   getSessionChannel();
-  const currentPromise = withSessionRefreshLock(() => {
+  const currentPromise = withSessionRefreshLock(async () => {
     if (generation !== sessionGeneration)
       throw new Error("Authentication context changed");
+    // Another tab may have renewed while this tab waited for the origin lock.
+    if (getApiToken() && getApiToken() !== previousToken) return null;
     return authApi.refresh();
   })
     .then((response) => {
       if (generation !== sessionGeneration) return false;
-      adoptAccessSession(response);
+      if (response) adoptAccessSession(response);
       return true;
     })
-    .catch(() => false)
+    .catch((error: unknown) => {
+      if (generation !== sessionGeneration || isAuthenticationRejected(error))
+        return false;
+      refreshError = error;
+      const delay = Math.min(
+        30_000,
+        5_000 * 2 ** Math.min(refreshFailures++, 3),
+      );
+      retryAfter = Date.now() + delay;
+      scheduleRefresh(delay);
+      throw error;
+    })
     .finally(() => {
       if (refreshPromise === currentPromise) refreshPromise = null;
     });

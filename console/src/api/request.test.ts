@@ -162,6 +162,7 @@ describe("request", () => {
   });
 
   it("preserves OS paths and the console basename on 401", async () => {
+    vi.mocked(refreshAccessSession).mockResolvedValueOnce(false);
     window.location.pathname = "/console/os/apps/office";
     mockFetch(401);
     await expect(request("/models")).rejects.toThrow("Not authenticated");
@@ -171,6 +172,7 @@ describe("request", () => {
   });
 
   it("does not redirect again when already on /login for 401", async () => {
+    vi.mocked(refreshAccessSession).mockResolvedValueOnce(false);
     window.location.pathname = "/console/login";
     window.location.href = "";
     mockFetch(401);

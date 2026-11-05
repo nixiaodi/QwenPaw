@@ -6,6 +6,7 @@ vi.mock("./modules/auth", () => ({
 
 vi.mock("./config", () => ({
   getApiAuthMode: vi.fn(() => "multi_user"),
+  getApiToken: vi.fn(() => ""),
   setAuthToken: vi.fn(),
   clearAuthToken: vi.fn(),
 }));
@@ -70,14 +71,30 @@ describe("authSession", () => {
 
   it("keeps cross-tab refresh blocked until bootstrap identity verification completes", async () => {
     let queue = Promise.resolve();
-    vi.stubGlobal("navigator", { locks: { request: (_name: string, callback: () => Promise<unknown>) => {
-      const result = queue.then(callback);
-      queue = result.then(() => undefined, () => undefined);
-      return result;
-    } } });
-    vi.mocked(authApi.refresh).mockResolvedValue({ token: "fresh", username: "admin", access_expires_at: new Date(Date.now() + 900_000).toISOString() });
+    vi.stubGlobal("navigator", {
+      locks: {
+        request: (_name: string, callback: () => Promise<unknown>) => {
+          const result = queue.then(callback);
+          queue = result.then(
+            () => undefined,
+            () => undefined,
+          );
+          return result;
+        },
+      },
+    });
+    vi.mocked(authApi.refresh).mockResolvedValue({
+      token: "fresh",
+      username: "admin",
+      access_expires_at: new Date(Date.now() + 900_000).toISOString(),
+    });
     let finishIdentity: (value: string) => void = () => undefined;
-    const identity = vi.fn(() => new Promise<string>((resolve) => { finishIdentity = resolve; }));
+    const identity = vi.fn(
+      () =>
+        new Promise<string>((resolve) => {
+          finishIdentity = resolve;
+        }),
+    );
     const restoring = restoreAccessSession(identity);
     await vi.waitFor(() => expect(identity).toHaveBeenCalledOnce());
     const refreshing = refreshAccessSession();
@@ -90,9 +107,17 @@ describe("authSession", () => {
   });
 
   it("does not restore identity after logout during account verification", async () => {
-    vi.mocked(authApi.refresh).mockResolvedValue({ token: "fresh", username: "admin" });
+    vi.mocked(authApi.refresh).mockResolvedValue({
+      token: "fresh",
+      username: "admin",
+    });
     let finish!: (value: string) => void;
-    const identify = vi.fn(() => new Promise<string>((resolve) => { finish = resolve; }));
+    const identify = vi.fn(
+      () =>
+        new Promise<string>((resolve) => {
+          finish = resolve;
+        }),
+    );
     const restoring = restoreAccessSession(identify);
     await vi.waitFor(() => expect(identify).toHaveBeenCalledOnce());
     clearAccessSession();

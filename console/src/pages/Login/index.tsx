@@ -4,11 +4,10 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import { Button, Form, Input } from "antd";
 import { useAppMessage } from "../../hooks/useAppMessage";
 import { LockOutlined, UserOutlined } from "@ant-design/icons";
-import { authApi } from "../../api/modules/auth";
-import { setApiAuthMode } from "../../api/config";
+import AuthBootstrapStatus from "../../components/AuthBootstrapStatus";
 import { useAuthStore } from "../../stores/authStore";
 import { useTheme } from "../../contexts/ThemeContext";
-import { getPostLoginHref } from "../../utils/navigationMode";
+import { getPostLoginHref, isLoginPath } from "../../utils/navigationMode";
 import { PRODUCT_NAME } from "../../config/brand";
 
 export default function LoginPage() {
@@ -18,15 +17,28 @@ export default function LoginPage() {
   const { isDark } = useTheme();
   const [loading, setLoading] = useState(false);
   const [isRegister, setIsRegister] = useState(false);
-  const [hasUsers, setHasUsers] = useState(true);
+  const hasUsers = useAuthStore((state) => state.hasUsers);
+  const phase = useAuthStore((state) => state.phase);
+  const bootstrap = useAuthStore((state) => state.bootstrap);
   const { message } = useAppMessage();
   const login = useAuthStore((state) => state.login);
   const register = useAuthStore((state) => state.register);
   const rawRedirect = searchParams.get("redirect") || "/chat";
-  const redirect =
-    rawRedirect.startsWith("/") && !rawRedirect.startsWith("//")
-      ? rawRedirect
-      : "/chat";
+  let redirect = "/chat";
+  if (
+    rawRedirect.startsWith("/") &&
+    !rawRedirect.startsWith("//") &&
+    !rawRedirect.includes("\\")
+  ) {
+    try {
+      const target = new URL(rawRedirect, "https://app.invalid");
+      const path = decodeURIComponent(target.pathname).replace(/\/+$/, "");
+      if (!isLoginPath(path))
+        redirect = target.pathname + target.search + target.hash;
+    } catch {
+      /* Malformed return paths fall back to the home chat. */
+    }
+  }
 
   const finishNavigation = useCallback(
     (target: string) => {
@@ -41,27 +53,14 @@ export default function LoginPage() {
   );
 
   useEffect(() => {
-    authApi
-      .getStatus()
-      .then((res) => {
-        const mode = res.mode ?? "legacy";
-        setApiAuthMode(mode);
-        useAuthStore.setState({
-          authEnabled: res.enabled,
-          mode,
-          phase: "anonymous",
-        });
-        if (!res.enabled) {
-          finishNavigation(redirect);
-          return;
-        }
-        setHasUsers(res.has_users);
-        if (!res.has_users) {
-          setIsRegister(true);
-        }
-      })
-      .catch(() => {});
-  }, [finishNavigation, redirect]);
+    if (phase === "loading") void bootstrap();
+    if (phase === "authenticated" || phase === "disabled")
+      finishNavigation(redirect);
+  }, [phase, bootstrap, finishNavigation, redirect]);
+
+  useEffect(() => {
+    setIsRegister(!hasUsers);
+  }, [hasUsers]);
 
   const onFinish = async (values: { username: string; password: string }) => {
     setLoading(true);
@@ -90,6 +89,8 @@ export default function LoginPage() {
       setLoading(false);
     }
   };
+
+  if (phase !== "anonymous") return <AuthBootstrapStatus />;
 
   return (
     <div

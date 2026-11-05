@@ -30,6 +30,7 @@ import { UpdateTakeoverGate } from "./components/UpdateTakeoverPage";
 import { Suspense } from "react";
 import { lazyImportWithRetry, lazyWithRetry } from "./utils/lazyWithRetry";
 import LoadingStatus from "./components/LoadingStatus";
+import AuthBootstrapStatus from "./components/AuthBootstrapStatus";
 import { ChunkErrorBoundary } from "./components/ChunkErrorBoundary";
 import {
   getLoginHref,
@@ -102,7 +103,7 @@ function AuthGuard({
     if (phase === "loading") void bootstrap();
   }, [bootstrap, phase]);
 
-  if (phase === "loading") return <LoadingStatus />;
+  if (phase === "loading") return <AuthBootstrapStatus />;
   if (phase === "anonymous") {
     const loginTo = getLoginPath(window.location);
     if (useHardRedirect) {

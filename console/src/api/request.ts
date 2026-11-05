@@ -1,4 +1,4 @@
-import { getApiAuthMode, getApiUrl } from "./config";
+import { getApiAuthMode, getApiToken, getApiUrl } from "./config";
 import { buildAuthHeaders } from "./authHeaders";
 import {
   clearAccessSession,
@@ -49,6 +49,9 @@ function buildHeaders(
 ): Headers {
   // Normalize extra to a Headers instance for consistent handling
   const headers = new Headers(extra);
+  // Multi-user credentials belong to the current identity, never the caller's
+  // captured options (including after that identity has been cleared).
+  if (getApiAuthMode() === "multi_user") headers.delete("Authorization");
 
   // Only add Content-Type for methods that typically have a body
   if (
@@ -126,6 +129,8 @@ export async function request<T = unknown>(
 
   let lastError: Error | null = null;
   let authRetried = false;
+  let tokenRetries = 0;
+  let sessionRejected = false;
 
   for (let attempt = 0; attempt <= retries; attempt++) {
     // Create AbortController for timeout handling
@@ -154,36 +159,55 @@ export async function request<T = unknown>(
         if (controller.signal.aborted) {
           throw new DOMException("The operation was aborted", "AbortError");
         }
+        const headers = buildHeaders(
+          method,
+          options.headers,
+          fetchOptions.body,
+        );
+        const attemptedToken =
+          headers.get("Authorization")?.replace(/^Bearer /, "") ?? "";
         response = await fetch(url, {
           ...fetchOptions,
-          headers: buildHeaders(method, options.headers, fetchOptions.body),
+          headers,
           signal: controller.signal,
         });
         if (controller.signal.aborted) {
           throw new DOMException("The operation was aborted", "AbortError");
         }
         assertAuthenticationCurrent();
-        if (
-          response.status !== 401 ||
-          authRetried ||
-          getApiAuthMode() !== "multi_user"
-        ) {
+        if (response.status !== 401 || getApiAuthMode() !== "multi_user") {
           break;
         }
+        // A late 401 for a rotated token says nothing about the new session.
+        if (getApiToken() && attemptedToken !== getApiToken()) {
+          if (tokenRetries++ >= 2)
+            throw new ApiRequestError(
+              "Session renewed; retry the request",
+              503,
+            );
+          continue;
+        }
+        if (authRetried) break;
         authRetried = true;
-        const refreshed = await refreshAccessSession();
+        const refreshed = await refreshAccessSession(attemptedToken);
         assertAuthenticationCurrent();
         if (controller.signal.aborted)
           throw new DOMException("The operation was aborted", "AbortError");
-        if (!refreshed) break;
+        if (!refreshed) {
+          sessionRejected = true;
+          break;
+        }
       }
 
       if (!response.ok) {
         if (response.status === 401) {
           assertAuthenticationCurrent();
-          clearAccessSession();
-          if (!isLoginPath(window.location.pathname)) {
-            window.location.href = getLoginHref(window.location);
+          // Only a rejected refresh (or legacy authentication) proves logout.
+          if (sessionRejected || authMode !== "multi_user") {
+            clearAccessSession();
+            if (!isLoginPath(window.location.pathname)) {
+              window.location.href = getLoginHref(window.location);
+            }
           }
           throw new ApiRequestError("Not authenticated", 401);
         }

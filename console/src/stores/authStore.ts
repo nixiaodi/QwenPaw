@@ -7,10 +7,12 @@ import {
   type UserProfileInput,
 } from "../api/modules/auth";
 import { getApiToken, setApiAuthMode } from "../api/config";
+import { AuthResponseError, isAuthenticationRejected } from "../api/authErrors";
 import { withSessionRefreshLock } from "../api/authSessionSync";
 import {
   adoptAccessSession,
   clearAccessSession,
+  getAccessSessionGeneration,
   restoreAccessSession,
   subscribeAccessSessionGeneration,
   subscribeAccessSessionUpdates,
@@ -35,6 +37,8 @@ type AuthPhase = "loading" | "authenticated" | "anonymous" | "disabled";
 interface AuthState {
   phase: AuthPhase;
   authEnabled: boolean;
+  hasUsers: boolean;
+  bootstrapError: boolean;
   mode: AuthMode;
   user: AuthUser | null;
   preferences: { language: string; timezone: string } | null;
@@ -58,6 +62,8 @@ interface AuthState {
 const initialState = {
   phase: "loading" as AuthPhase,
   authEnabled: false,
+  hasUsers: true,
+  bootstrapError: false,
   mode: "legacy" as AuthMode,
   user: null,
   preferences: null,
@@ -66,6 +72,12 @@ const initialState = {
 };
 
 const EXPLICIT_LOGOUT_KEY = "qwenpaw:explicit-logout";
+let bootstrapPromise: Promise<void> | null = null;
+let identityOperation = 0;
+function invalidateBootstrap() {
+  identityOperation += 1;
+  bootstrapPromise = null;
+}
 
 const USER_SCOPED_STORAGE_KEYS = new Set([
   "qwenpaw-agent-storage",
@@ -155,46 +167,67 @@ async function loadIdentity() {
 export const useAuthStore = create<AuthState>()((set, get) => ({
   ...initialState,
 
-  bootstrap: async () => {
-    set({ phase: "loading" });
-    try {
-      const status = await authApi.getStatus();
-      const mode: AuthMode = status.mode ?? "legacy";
-      setApiAuthMode(mode);
-      set({ authEnabled: status.enabled, mode });
-      if (!status.enabled) {
-        set({ phase: "disabled" });
-        return;
-      }
-      if (mode === "multi_user") {
-        if (localStorage.getItem(EXPLICIT_LOGOUT_KEY)) {
-          throw new Error("Explicitly signed out");
+  bootstrap: () => {
+    if (bootstrapPromise) return bootstrapPromise;
+    const operation = ++identityOperation;
+    const generation = getAccessSessionGeneration();
+    const current = () =>
+      operation === identityOperation &&
+      generation === getAccessSessionGeneration();
+    set({ phase: "loading", bootstrapError: false });
+    const pending = (async () => {
+      try {
+        const status = await authApi.getStatus();
+        if (!current()) return;
+        const mode: AuthMode = status.mode ?? "legacy";
+        setApiAuthMode(mode);
+        set({ authEnabled: status.enabled, hasUsers: status.has_users, mode });
+        if (!status.enabled) {
+          set({ phase: "disabled" });
+          return;
         }
-        const { identity } = await restoreAccessSession(loadIdentity);
-        adoptAuthenticatedUser(identity.user.id);
+        if (mode === "multi_user") {
+          if (!status.has_users || localStorage.getItem(EXPLICIT_LOGOUT_KEY)) {
+            throw new AuthResponseError("No active login", 401);
+          }
+          const { identity } = await restoreAccessSession(loadIdentity);
+          if (!current()) return;
+          adoptAuthenticatedUser(identity.user.id);
+          set({
+            phase: "authenticated",
+            user: identity.user,
+            preferences: identity.preferences,
+            accessToken: getApiToken(),
+          });
+          return;
+        }
+        await authApi.verify();
+        if (!current()) return;
+        set({ phase: "authenticated" });
+      } catch (error) {
+        if (!current()) return;
+        if (!isAuthenticationRejected(error)) {
+          set({ bootstrapError: true });
+          return;
+        }
+        clearAccessSession(false);
         set({
-          phase: "authenticated",
-          user: identity.user,
-          preferences: identity.preferences,
-          accessToken: getApiToken(),
+          phase: "anonymous",
+          user: null,
+          preferences: null,
+          sessions: [],
+          accessToken: "",
         });
-        return;
       }
-      await authApi.verify();
-      set({ phase: "authenticated" });
-    } catch {
-      clearAccessSession(false);
-      set({
-        phase: "anonymous",
-        user: null,
-        preferences: null,
-        sessions: [],
-        accessToken: "",
-      });
-    }
+    })().finally(() => {
+      if (bootstrapPromise === pending) bootstrapPromise = null;
+    });
+    bootstrapPromise = pending;
+    return pending;
   },
 
   login: async (username, password) => {
+    invalidateBootstrap();
     const { response, identity } = await withSessionRefreshLock(async () => {
       const response = await authApi.login(username, password);
       localStorage.removeItem(EXPLICIT_LOGOUT_KEY);
@@ -219,6 +252,7 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
   },
 
   register: async (username, password) => {
+    invalidateBootstrap();
     const { response, identity } = await withSessionRefreshLock(async () => {
       const response = await authApi.register(username, password);
       localStorage.removeItem(EXPLICIT_LOGOUT_KEY);
@@ -238,6 +272,7 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
   },
 
   logout: async () => {
+    invalidateBootstrap();
     if (get().mode === "multi_user") {
       localStorage.setItem(EXPLICIT_LOGOUT_KEY, "1");
       // Keep cookie revocation ordered with refresh/login without blocking the UI.
@@ -301,6 +336,7 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
 }));
 
 subscribeAccessSessionGeneration(() => {
+  invalidateBootstrap();
   if (useAuthStore.getState().mode !== "multi_user") return;
   resetUserScopedClientState();
   useAuthStore.setState({
@@ -309,6 +345,7 @@ subscribeAccessSessionGeneration(() => {
     preferences: null,
     sessions: [],
     accessToken: "",
+    bootstrapError: false,
   });
 });
 

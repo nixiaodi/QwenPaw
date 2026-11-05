@@ -84,6 +84,12 @@ class ChatListItem(ChatSpec):
     shared_by: str | None = None
 
 
+class ChatListPage(BaseModel):
+    items: list[ChatListItem]
+    has_more: bool
+    next_cursor: str | None = None
+
+
 class ChatUpdate(BaseModel):
     """Mutable chat fields accepted from external clients.
 

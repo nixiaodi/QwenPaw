@@ -1,72 +1,23 @@
-import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  subscribeUserInputUpdates,
   userInputApi,
+  subscribeUserInputUpdates,
   type UserInputRequest,
 } from "../../api/modules/userInput";
+import { useSessionResource } from "../../hooks/useSessionResource";
 
-function getBackendSessionId(): string {
-  return (window as any).currentSessionId || "";
-}
+const resource = {
+  load: async (
+    sessionId: string,
+    signal: AbortSignal,
+    agentId: string,
+  ): Promise<UserInputRequest | null> => {
+    const value = await userInputApi.getPending(sessionId, { signal, agentId });
+    return value;
+  },
+  subscribe: subscribeUserInputUpdates,
+};
 
 export function usePendingUserInput(active: boolean) {
-  const [request, setRequest] = useState<UserInputRequest | null>(null);
-  const [loading, setLoading] = useState(false);
-  const prevBackendSidRef = useRef("");
-
-  const fetchPending = useCallback(async () => {
-    const sid = getBackendSessionId();
-    if (sid !== prevBackendSidRef.current) {
-      prevBackendSidRef.current = sid;
-      setRequest(null);
-    }
-    if (!sid) return;
-    setLoading(true);
-    try {
-      const data = await userInputApi.getPending(sid);
-      setRequest(data);
-    } catch {
-      // ignore transient polling errors
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    if (!active) {
-      setRequest(null);
-      return;
-    }
-    fetchPending();
-  }, [active, fetchPending]);
-
-  useEffect(() => {
-    if (!active) return;
-
-    const unsub = subscribeUserInputUpdates(
-      (updated, eventSessionId, eventRootSessionId) => {
-        const mySid = getBackendSessionId();
-        if (
-          mySid &&
-          eventSessionId &&
-          eventRootSessionId &&
-          eventSessionId !== mySid &&
-          eventRootSessionId !== mySid
-        ) {
-          return;
-        }
-        setRequest(updated);
-      },
-    );
-
-    return () => unsub();
-  }, [active]);
-
-  useEffect(() => {
-    if (!active) return;
-    const interval = setInterval(fetchPending, 5000);
-    return () => clearInterval(interval);
-  }, [active, fetchPending]);
-
-  return { request, loading, refresh: fetchPending };
+  const { value, loading, refresh } = useSessionResource(active, resource);
+  return { request: value, loading, refresh };
 }

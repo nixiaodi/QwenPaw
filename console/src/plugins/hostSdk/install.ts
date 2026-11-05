@@ -12,7 +12,7 @@
 import type React from "react";
 import { chatExtensions } from "../registry/chatExtensions";
 import { auditStore } from "../registry/audit";
-import { pluginSystem } from "../hostExternals";
+import { pluginSystem } from "../pluginSystem";
 import { combineDisposables } from "../registry/types";
 import { ChatScalar } from "../registry/slotKeys";
 import type {

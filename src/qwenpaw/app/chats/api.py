@@ -4,11 +4,14 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 from pathlib import Path
 from typing import Annotated, Literal, Optional
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from starlette.responses import Response
 from pydantic import BaseModel, Field
 
 from agentscope.message import Msg
@@ -34,6 +37,7 @@ from .models import (
     ChatUpdate,
     ChatHistory,
     ChatListItem,
+    ChatListPage,
 )
 from .repo import (
     AttachmentRecord,
@@ -446,6 +450,61 @@ async def remove_conversation_member(
     return {"success": True, "removed": removed}
 
 
+async def _chat_list_item(chat, access, tracker):
+    fields = {"status": await tracker.get_status(chat.id)}
+    if access is not None:
+        fields.update(access_role=access.access_role, read_only=access.read_only,
+                      shared_by=access.shared_by_username)
+    return ChatListItem.model_validate(chat.model_dump() | fields)
+
+
+@router.get("/page", response_model=ChatListPage)
+async def list_chat_page(
+    request: Request,
+    page_size: int = Query(20, ge=1, le=100),
+    cursor: str | None = Query(None, max_length=1024),
+    search: str = Query("", max_length=200),
+    owner_query: str = Query("", max_length=200),
+    session_id: str | None = Query(None, max_length=256),
+    channel: str | None = Query(None, max_length=100),
+    archived: bool | None = Query(False),
+    scope: Literal["all", "owned", "shared"] = Query("all"),
+    mgr: ChatManager = Depends(get_chat_manager),
+    workspace=Depends(get_workspace),
+):
+    user_id = None
+    if is_multi_user_enabled():
+        user_id = get_actor(request).user_id
+        if user_id is None:
+            raise HTTPException(404, "Chat not found")
+    try:
+        page = await mgr.list_chat_page(
+            user_id=user_id, agent_id=agent_database_id(workspace.agent_id),
+            page_size=page_size, cursor=cursor, search=search, owner_query=owner_query,
+            channel=channel, archived=archived, scope=scope,
+            session_id=session_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(503, "conversation_authority_unavailable") from exc
+    items = [await _chat_list_item(item.chat, item.access, workspace.task_tracker)
+             for item in page.items]
+    return ChatListPage(items=items, has_more=page.has_more, next_cursor=page.next_cursor)
+
+
+@router.get("/{chat_id}/spec", response_model=ChatListItem)
+async def get_chat_spec(
+    chat_id: str, request: Request, mgr: ChatManager = Depends(get_chat_manager),
+    workspace=Depends(get_workspace),
+):
+    if is_multi_user_enabled():
+        chat, access = await _require_readable_chat(request, mgr, workspace, chat_id)
+    else:
+        chat, access = await _require_owned_chat(request, mgr, chat_id), None
+    return await _chat_list_item(chat, access, workspace.task_tracker)
+
+
 @router.get("", response_model=list[ChatListItem])
 async def list_chats(
     request: Request,
@@ -484,6 +543,7 @@ async def list_chats(
                 scope=scope,
                 channel=channel,
                 archived=archived,
+                agent_id=agent_database_id(workspace.agent_id),
             )
         except RuntimeError as exc:
             logger.error("Conversation authority unavailable", exc_info=True)
@@ -525,7 +585,27 @@ async def list_chats(
                 }
             )
         )
-    return result
+    # Revalidate only after rebuilding the caller's authorized view. A revoked
+    # share, renamed chat or changed running status must invalidate the list.
+    body = json.dumps(
+        [item.model_dump(mode="json") for item in result],
+        ensure_ascii=False,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    etag = 'W/"' + hashlib.sha256(body).hexdigest() + '"'
+    headers = {
+        "ETag": etag,
+        "Cache-Control": "private, no-cache",
+        "Vary": "Authorization, Cookie, X-Agent-Id",
+    }
+    validators = [
+        value.strip().removeprefix("W/")
+        for value in request.headers.get("if-none-match", "").split(",")
+    ]
+    if etag.removeprefix("W/") in validators or "*" in validators:
+        return Response(status_code=304, headers=headers)
+    return Response(body, media_type="application/json", headers=headers)
 
 
 @router.post("", response_model=ChatSpec)

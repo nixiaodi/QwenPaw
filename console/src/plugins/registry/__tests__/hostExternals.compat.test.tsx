@@ -110,4 +110,22 @@ describe("legacy registerRoutes shim", () => {
     window.QwenPaw.registerToolRender!("p1", { my_tool: RenderFC });
     expect(pluginSystem.getToolRenderConfig().my_tool).toBe(RenderFC);
   });
+
+  it("keeps plugin overrides when built-in cards register after login", async () => {
+    const { pluginSystem } = await import("../../hostExternals");
+    const PluginCard = () => null;
+    const BuiltinCard = () => null;
+    pluginSystem.addToolRenderers("early-plugin", { lazy_tool: PluginCard });
+    pluginSystem.addToolRenderers(
+      "late-builtins",
+      { lazy_tool: BuiltinCard },
+      { isBuiltin: true },
+    );
+    try {
+      expect(pluginSystem.getToolRenderConfig().lazy_tool).toBe(PluginCard);
+    } finally {
+      pluginSystem.remove("early-plugin");
+      pluginSystem.remove("late-builtins");
+    }
+  });
 });

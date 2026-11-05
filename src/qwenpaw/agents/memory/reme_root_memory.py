@@ -3,12 +3,15 @@
 
 import os
 from pathlib import Path
+from contextlib import aclosing
 from typing import Any, Callable
 
 from reme.components import R
 from reme.schema import FileNode
 from reme.steps import BaseStep
-from watchfiles import Change, awatch
+from watchfiles import Change
+
+from ...utils.file_watcher import isolated_awatch as awatch
 
 ROOT_MEMORY_FILENAME = "MEMORY.md"
 
@@ -114,7 +117,7 @@ class RootMemoryWatchStep(BaseStep):
                 "qwenpaw_root_memory_watch_step requires stop_event",
             )
 
-        async for raw_changes in self._awatch_factory(
+        watcher = self._awatch_factory(
             self.workspace_path,
             watch_filter=self._filter,
             recursive=False,
@@ -125,23 +128,25 @@ class RootMemoryWatchStep(BaseStep):
             rust_timeout=1_000,
             yield_on_timeout=True,
             stop_event=self.context.stop_event,
-        ):
-            changes = root_memory_events(raw_changes, self.workspace_path)
-            if not changes and not raw_changes:
-                nodes = await self.file_store.get_nodes()
-                indexed = next(
-                    (node for node in nodes if node.path == ROOT_MEMORY_FILENAME),
-                    None,
-                )
-                changes = _root_memory_changes(
-                    self.workspace_path / ROOT_MEMORY_FILENAME,
-                    indexed,
-                )
-            if changes:
-                await self.dispatch_steps(
-                    self.dispatch_step_specs,
-                    changes=changes,
-                )
-            if self.context.stop_event.is_set():
-                break
+        )
+        async with aclosing(watcher):
+            async for raw_changes in watcher:
+                changes = root_memory_events(raw_changes, self.workspace_path)
+                if not changes and not raw_changes:
+                    nodes = await self.file_store.get_nodes()
+                    indexed = next(
+                        (node for node in nodes if node.path == ROOT_MEMORY_FILENAME),
+                        None,
+                    )
+                    changes = _root_memory_changes(
+                        self.workspace_path / ROOT_MEMORY_FILENAME,
+                        indexed,
+                    )
+                if changes:
+                    await self.dispatch_steps(
+                        self.dispatch_step_specs,
+                        changes=changes,
+                    )
+                if self.context.stop_event.is_set():
+                    break
         return self.context.response

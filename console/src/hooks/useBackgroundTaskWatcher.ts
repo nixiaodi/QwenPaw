@@ -12,6 +12,8 @@ import {
 } from "../api/modules/toolCalls";
 import { useBackgroundTasksStore } from "../stores/backgroundTasksStore";
 import { resolveBackendSessionId } from "../utils/resolveBackendSessionId";
+import { ApiRequestError } from "../api/request";
+import { schedulePolling } from "../utils/polling";
 
 const POLL_INTERVAL_MS = 3000;
 const LIVE_OUTPUT_MAX = 80_000;
@@ -116,41 +118,46 @@ async function finalizeFromOutput(
 }
 
 function startPolling(sessionId: string, toolCallId: string): AbortFn {
-  let stopped = false;
-  const timer = setInterval(async () => {
-    if (stopped) return;
-    const finishPoll = async (cancelled: boolean) => {
-      if (stopped) return;
-      stopped = true;
-      clearInterval(timer);
-      const abort = activeWatchers.get(toolCallId);
-      activeWatchers.delete(toolCallId);
-      // Abort stream leg only; poll already stopped
-      abort?.();
-      const live =
-        useBackgroundTasksStore
-          .getState()
-          .tasks.find((t) => t.toolCallId === toolCallId)?.liveOutput || "";
-      await finalizeFromOutput(sessionId, toolCallId, live, cancelled);
-    };
-    try {
-      const info = await toolCallsApi.getInfo(sessionId, toolCallId);
-      if (info.status === "running" || info.status === "offloaded") {
-        return;
+  const stop = schedulePolling(
+    async (signal) => {
+      const finishPoll = async (cancelled: boolean) => {
+        if (signal.aborted) return;
+        stop();
+        const abort = activeWatchers.get(toolCallId);
+        activeWatchers.delete(toolCallId);
+        // Abort stream leg only; poll already stopped
+        abort?.();
+        const live =
+          useBackgroundTasksStore
+            .getState()
+            .tasks.find((t) => t.toolCallId === toolCallId)?.liveOutput || "";
+        await finalizeFromOutput(sessionId, toolCallId, live, cancelled);
+      };
+      try {
+        const info = await toolCallsApi.getInfo(sessionId, toolCallId, signal);
+        if (signal.aborted) return;
+        if (info.status === "running" || info.status === "offloaded") {
+          return;
+        }
+        const cancelled =
+          info.end_state === "interrupted" || !!info.force_cancelled;
+        await finishPoll(cancelled);
+      } catch (error) {
+        // A network error is not evidence that the tool has finished.
+        if (error instanceof ApiRequestError && error.status === 404) {
+          await finishPoll(false);
+        } else {
+          throw error;
+        }
       }
-      const cancelled =
-        info.end_state === "interrupted" || !!info.force_cancelled;
-      await finishPoll(cancelled);
-    } catch {
-      // 404 after finalize — treat as completed and try getOutput once
-      await finishPoll(false);
-    }
-  }, POLL_INTERVAL_MS);
-
-  return () => {
-    stopped = true;
-    clearInterval(timer);
-  };
+    },
+    {
+      intervalMs: POLL_INTERVAL_MS,
+      hiddenIntervalMs: 30_000,
+      immediate: false,
+    },
+  );
+  return stop;
 }
 
 /**
@@ -249,8 +256,24 @@ export function startBackgroundTaskWatcher(
   let settled = false;
   let pollAbort: AbortFn | null = null;
   let streamAbort: AbortFn = () => {};
+  let pendingOutput = "";
+  let outputTimer: ReturnType<typeof setTimeout> | undefined;
+
+  const flushOutput = () => {
+    clearTimeout(outputTimer);
+    outputTimer = undefined;
+    if (!pendingOutput) return;
+    useBackgroundTasksStore
+      .getState()
+      .appendLiveOutput(toolCallId, pendingOutput);
+    pendingOutput = "";
+  };
 
   const abortAll = () => {
+    settled = true;
+    // Flush before completion/cancellation reads liveOutput; no trailing text
+    // may be lost when the final event arrives inside the batching window.
+    flushOutput();
     streamAbort();
     pollAbort?.();
   };
@@ -269,9 +292,11 @@ export function startBackgroundTaskWatcher(
 
   streamAbort = subscribeToolCallStream(sessionId, toolCallId, {
     onChunk: (payload) => {
+      if (settled) return;
       const text = chunkToText(payload);
       if (text) {
-        useBackgroundTasksStore.getState().appendLiveOutput(toolCallId, text);
+        pendingOutput = (pendingOutput + text).slice(-LIVE_OUTPUT_MAX);
+        outputTimer ??= setTimeout(flushOutput, 50);
       }
     },
     onDone: () => {
@@ -279,6 +304,7 @@ export function startBackgroundTaskWatcher(
     },
     onError: () => {
       if (settled || pollAbort) return;
+      flushOutput();
       pollAbort = startPolling(sessionId, toolCallId);
     },
   });

@@ -3,6 +3,7 @@ import { toolCallsApi } from "../api/modules/toolCalls";
 import { resolveBackendSessionId } from "../utils/resolveBackendSessionId";
 import { registerBackgroundTask } from "./useBackgroundTaskWatcher";
 import { useBackgroundTasksStore } from "../stores/backgroundTasksStore";
+import { schedulePolling } from "../utils/polling";
 
 const AUTO_POPUP_SECS = 30;
 /** Minimum foreground runtime before auto-opening the control panel. */
@@ -50,7 +51,6 @@ export function useToolCallControl(
   const serverKillRef = useRef<number | null>(null);
   const serverElapsedRef = useRef(0);
   const serverTimestampRef = useRef<number>(0);
-  const fetchedRef = useRef(false);
   const autoTriggeredRef = useRef(false);
   const autoOffloadRegisteredRef = useRef(false);
   /** First positive offload_remaining seen for this call (popup gating). */
@@ -205,33 +205,34 @@ export function useToolCallControl(
     [startLocalCountdown],
   );
 
-  // Fetch deadlines when the tool starts. Backend session_id may not be ready
-  // on the first paint (new chat / mapping lag) — retry like bg-task hydrate
-  // instead of permanently locking fetchedRef after a failed/empty attempt.
+  // One request loop owns both startup and status refresh. A separate fast
+  // startup retry used to flood slow endpoints alongside the regular poll.
   useEffect(() => {
     if (!isCalling || !toolCallId) return;
 
-    fetchedRef.current = false;
     autoOffloadRegisteredRef.current = false;
     initialOffloadRef.current = null;
     autoTriggeredRef.current = false;
-    let cancelled = false;
-    let attempts = 0;
     let policyLoaded = false;
 
-    const tryFetch = async () => {
-      if (cancelled || fetchedRef.current) return;
+    const poll = async (signal: AbortSignal) => {
+      if (autoOffloadRegisteredRef.current) return;
 
       const sid = resolveSessionId(sessionId);
       const infoPromise = sid
-        ? toolCallsApi.getInfo(sid, toolCallId).catch(() => null)
+        ? toolCallsApi.getInfo(sid, toolCallId, signal)
         : Promise.resolve(null);
       const policyPromise = policyLoaded
         ? Promise.resolve(null)
-        : toolCallsApi.getOffloadPolicy().catch(() => null);
+        : toolCallsApi.getOffloadPolicy(signal);
 
-      const [info, policy] = await Promise.all([infoPromise, policyPromise]);
-      if (cancelled) return;
+      const [infoResult, policyResult] = await Promise.allSettled([
+        infoPromise,
+        policyPromise,
+      ]);
+      if (signal.aborted) return;
+      const policy =
+        policyResult.status === "fulfilled" ? policyResult.value : null;
 
       if (policy) {
         policyLoaded = true;
@@ -242,84 +243,29 @@ export function useToolCallControl(
         setState((s) => ({ ...s, defaultPolicy: dp }));
       }
 
-      if (!info) return;
-
-      fetchedRef.current = true;
-      if (info.status === "offloaded") {
-        tryRegisterBackground("initial-getInfo-offloaded");
-      }
-      applyServerValues(
-        info.offload_remaining ?? null,
-        info.kill_remaining ?? null,
-        {
-          elapsed: info.elapsed ?? 0,
-          maxInternalTimeoutSecs: info.max_internal_timeout_secs ?? null,
-        },
-      );
-    };
-
-    void tryFetch();
-    const timer = setInterval(() => {
-      attempts += 1;
-      if (fetchedRef.current || attempts >= 20) {
-        clearInterval(timer);
-        return;
-      }
-      void tryFetch();
-    }, 250);
-
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
-  }, [
-    isCalling,
-    sessionId,
-    toolCallId,
-    applyServerValues,
-    tryRegisterBackground,
-  ]);
-
-  // Poll backend status while calling — catches system auto-offload even when
-  // the tool card leaves "calling" before the local countdown hits zero.
-  useEffect(() => {
-    if (!isCalling || !toolCallId) return;
-
-    let cancelled = false;
-    const poll = async () => {
-      if (cancelled || autoOffloadRegisteredRef.current) return;
-      const sid = resolveSessionId(sessionId);
-      if (!sid) return;
-      try {
-        const info = await toolCallsApi.getInfo(sid, toolCallId);
-        if (cancelled) return;
+      const info = infoResult.status === "fulfilled" ? infoResult.value : null;
+      if (info) {
         if (info.status === "offloaded") {
           tryRegisterBackground("poll-offloaded");
-          return;
         }
-        if (info.status === "running") {
-          // Refresh remaining so kill countdown stays correct after offload
-          // deadline clears under keep_foreground.
-          applyServerValues(
-            info.offload_remaining ?? null,
-            info.kill_remaining ?? null,
-            {
-              elapsed: info.elapsed ?? 0,
-              maxInternalTimeoutSecs: info.max_internal_timeout_secs ?? null,
-            },
-          );
-        }
-      } catch {
-        /* ignore transient errors */
+        applyServerValues(
+          info.offload_remaining ?? null,
+          info.kill_remaining ?? null,
+          {
+            elapsed: info.elapsed ?? 0,
+            maxInternalTimeoutSecs: info.max_internal_timeout_secs ?? null,
+          },
+        );
       }
+      if (infoResult.status === "rejected") throw infoResult.reason;
+      if (policyResult.status === "rejected") throw policyResult.reason;
     };
 
-    void poll();
-    const id = setInterval(poll, OFFLOAD_POLL_MS);
-    return () => {
-      cancelled = true;
-      clearInterval(id);
-    };
+    return schedulePolling(poll, {
+      // Only mapping checks use 250 ms; actual network refreshes use 2 s.
+      intervalMs: () => (resolveSessionId(sessionId) ? OFFLOAD_POLL_MS : 250),
+      hiddenIntervalMs: 30_000,
+    });
   }, [
     isCalling,
     sessionId,
@@ -342,7 +288,6 @@ export function useToolCallControl(
     }
 
     if (!wasCalling || !toolCallId || autoOffloadRegisteredRef.current) {
-      fetchedRef.current = false;
       autoTriggeredRef.current = false;
       initialOffloadRef.current = null;
       return;
@@ -351,10 +296,12 @@ export function useToolCallControl(
     // Only register after the backend confirms offloaded — local countdown
     // reaching zero is not sufficient (policy changes / clock skew).
     const sid = resolveSessionId(sessionId);
+    const controller = new AbortController();
     if (sid) {
       void toolCallsApi
-        .getInfo(sid, toolCallId)
+        .getInfo(sid, toolCallId, controller.signal)
         .then((info) => {
+          if (controller.signal.aborted) return;
           // Only background-queue registrations belong here. Foreground
           // success/cancel must not appear in the bg task panel.
           if (info.status === "offloaded") {
@@ -385,9 +332,9 @@ export function useToolCallControl(
         });
     }
 
-    fetchedRef.current = false;
     autoTriggeredRef.current = false;
     initialOffloadRef.current = null;
+    return () => controller.abort();
   }, [isCalling, sessionId, toolCallId, tryRegisterBackground]);
 
   // Cleanup on unmount

@@ -66,7 +66,7 @@ export function extractOutputText(output: ToolCallOutput): string {
 
 /**
  * Subscribe to ToolStream SSE via fetch (supports auth headers).
- * Calls onChunk for each data payload; onDone when type===done or stream ends.
+ * Calls onDone only for an explicit done event; an early EOF triggers fallback.
  * Returns an abort function.
  */
 export function subscribeToolCallStream(
@@ -98,28 +98,34 @@ export function subscribeToolCallStream(
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const parts = buffer.split("\n\n");
-        buffer = parts.pop() || "";
-        for (const part of parts) {
-          const line = part.split("\n").find((l) => l.startsWith("data: "));
-          if (!line) continue;
-          try {
-            const payload = JSON.parse(line.slice(6));
-            if (payload.type === "done") {
-              handlers.onDone();
-              return;
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (controller.signal.aborted) return;
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const parts = buffer.split("\n\n");
+          buffer = parts.pop() || "";
+          for (const part of parts) {
+            const line = part.split("\n").find((l) => l.startsWith("data: "));
+            if (!line) continue;
+            try {
+              const payload = JSON.parse(line.slice(6));
+              if (payload.type === "done") {
+                handlers.onDone();
+                return;
+              }
+              handlers.onChunk(payload);
+            } catch {
+              /* ignore malformed */
             }
-            handlers.onChunk(payload);
-          } catch {
-            /* ignore malformed */
           }
         }
+        handlers.onError(new Error("Tool stream ended before completion"));
+      } finally {
+        await reader.cancel().catch(() => {});
+        reader.releaseLock();
       }
-      handlers.onDone();
     } catch (err) {
       if ((err as { name?: string })?.name === "AbortError") return;
       handlers.onError(err);
@@ -132,8 +138,8 @@ export function subscribeToolCallStream(
 export const toolCallsApi = {
   list: (sid: string) => request<ToolCallListResponse>(`${BASE}/${sid}`),
 
-  getInfo: (sid: string, tcid: string) =>
-    request<ToolCallInfo>(`${BASE}/${sid}/${tcid}`),
+  getInfo: (sid: string, tcid: string, signal?: AbortSignal) =>
+    request<ToolCallInfo>(`${BASE}/${sid}/${tcid}`, { signal }),
 
   getOutput: (sid: string, tcid: string) =>
     request<ToolCallOutput>(`${BASE}/${sid}/${tcid}/output`),
@@ -162,8 +168,8 @@ export const toolCallsApi = {
       body: JSON.stringify({ target: "kill", seconds }),
     }),
 
-  getOffloadPolicy: () =>
-    request<{ default_action: string }>("/settings/offload-policy"),
+  getOffloadPolicy: (signal?: AbortSignal) =>
+    request<{ default_action: string }>("/settings/offload-policy", { signal }),
 
   setOffloadPolicy: (action: "keep_foreground" | "offload") =>
     request("/settings/offload-policy", {

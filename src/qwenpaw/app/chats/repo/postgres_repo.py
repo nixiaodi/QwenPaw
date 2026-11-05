@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import Any, AsyncContextManager
 from uuid import UUID, uuid5
 
-from sqlalchemy import text
+from sqlalchemy import text, bindparam
 
 from ....persistence.database import database_session
 from ....persistence.database import set_request_user
@@ -253,17 +253,22 @@ class PostgresConversationRepository(ConversationRepository):
         *,
         user_id: UUID,
         scope: str = "all",
+        agent_id: UUID | None = None,
+        conversation_ids: list[UUID] | None = None,
     ) -> list[ConversationAccessRecord]:
         if scope not in {"all", "owned", "shared"}:
             raise ValueError("invalid_conversation_scope")
+        if conversation_ids == []:
+            return []
         scope_clause = {
             "owned": "c.owner_user_id = :user_id",
             "shared": "cm.user_id = :user_id AND c.owner_user_id <> :user_id",
             "all": "(c.owner_user_id = :user_id OR cm.user_id = :user_id)",
         }[scope]
+        agent_clause = "AND c.agent_id = :agent_id " if agent_id is not None else ""
+        ids_clause = "AND c.id IN :conversation_ids " if conversation_ids is not None else ""
         async with self._session() as session:
-            result = await session.execute(
-                text(
+            statement = text(
                     f"SELECT c.*, CASE WHEN c.owner_user_id = :user_id "
                     f"THEN 'owner' ELSE 'viewer' END AS access_role, "
                     f"CASE WHEN c.owner_user_id = :user_id THEN NULL "
@@ -271,6 +276,7 @@ class PostgresConversationRepository(ConversationRepository):
                     f"FROM {self._table('conversations')} c "
                     f"LEFT JOIN {self._table('conversation_members')} cm "
                     "ON cm.conversation_id = c.id AND cm.role = 'viewer' "
+                    "AND cm.user_id = :user_id "
                     f"JOIN {self._table('agents')} a ON a.id = c.agent_id "
                     f"LEFT JOIN {self._table('agent_members')} am "
                     "ON am.agent_id = a.id AND am.user_id = :user_id "
@@ -278,13 +284,23 @@ class PostgresConversationRepository(ConversationRepository):
                     f"LEFT JOIN {self._table('users')} granted "
                     "ON granted.id = cm.granted_by "
                     f"WHERE c.status <> 'deleted' AND a.status <> 'deleted' "
+                    f"{agent_clause}"
+                    f"{ids_clause}"
                     f"AND {scope_clause} "
                     "AND (c.owner_user_id = :user_id OR ("
                     "cm.user_id = :user_id AND (a.owner_user_id = :user_id "
                     "OR a.visibility = 'public' OR am.user_id IS NOT NULL))) "
-                    "ORDER BY c.updated_at DESC"
-                ),
-                {"user_id": user_id},
+                    "ORDER BY c.updated_at DESC, c.id DESC"
+                )
+            if conversation_ids is not None:
+                statement = statement.bindparams(bindparam("conversation_ids", expanding=True))
+            result = await session.execute(
+                statement,
+                {
+                    "user_id": user_id,
+                    **({"agent_id": agent_id} if agent_id is not None else {}),
+                    **({"conversation_ids": conversation_ids} if conversation_ids is not None else {}),
+                },
             )
             rows = result.mappings().all()
         records: list[ConversationAccessRecord] = []
@@ -303,7 +319,10 @@ class PostgresConversationRepository(ConversationRepository):
             )
         return records
 
-    async def list_conversations_for_admin(self, agent_id: UUID) -> list[dict]:
+    async def list_conversations_for_admin(
+        self, agent_id: UUID, *, limit: int | None = None,
+        after: tuple[datetime, UUID] | None = None, search: str = "",
+    ) -> list[dict]:
         """只读排查视图同时检查数据库管理员身份和目标智能体。"""
         async with self._session() as session:
             rows = (
@@ -315,9 +334,18 @@ class PostgresConversationRepository(ConversationRepository):
                             f"JOIN {self._table('users')} u ON u.id=c.owner_user_id "
                             f"JOIN {self._table('agents')} a ON a.id=c.agent_id "
                             f"WHERE c.agent_id=:agent AND c.status<>'deleted' AND a.status<>'deleted' "
-                            f"AND {self._table('qwenpaw_is_active_admin')}() ORDER BY c.updated_at DESC"
+                            f"AND {self._table('qwenpaw_is_active_admin')}() "
+                            + ("AND (c.updated_at, c.id) < (:after_time, :after_id) " if after else "")
+                            + ("AND position(lower(:search) in lower(concat_ws(' ', c.title, "
+                               "COALESCE(NULLIF(u.display_name,''),u.username), "
+                               "CAST(c.owner_user_id AS TEXT), CAST(c.id AS TEXT)))) > 0 " if search else "")
+                            + "ORDER BY c.updated_at DESC, c.id DESC "
+                            + ("LIMIT :limit" if limit is not None else "")
                         ),
-                        {"agent": agent_id},
+                        {"agent": agent_id,
+                         **({"after_time": after[0], "after_id": after[1]} if after else {}),
+                         **({"search": search.strip()} if search else {}),
+                         **({"limit": limit} if limit is not None else {})},
                     )
                 )
                 .mappings()

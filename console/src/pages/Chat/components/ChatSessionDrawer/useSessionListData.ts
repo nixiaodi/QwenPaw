@@ -12,39 +12,12 @@ import {
 } from "../../../../components/ContextMenu";
 import { getChannelLabel } from "../../../Control/Channels/components";
 import { syncSessionsGlobal } from "../../../../stores/sessionListStore";
-import { useAgentStore } from "../../../../stores/agentStore";
 import { useAppMessage } from "../../../../hooks/useAppMessage";
 import { approvalLevelStorageKey } from "../ApprovalLevelToggle";
+import { useChatListPages } from "../../../../hooks/useChatListPages";
+import { areSessionListsEqual } from "../../sessionListEqual";
 
 export { ContextMenu, useContextMenu, type ContextMenuItem, getChannelLabel };
-
-/**
- * Shallow-compare two session arrays by visible fields.
- * Returns true when the list would look identical, so we can skip
- * the state update and avoid a full re-render cascade.
- */
-function sessionsEqual(
-  prev: ExtendedChatSession[],
-  next: ExtendedChatSession[],
-): boolean {
-  if (prev.length !== next.length) return false;
-  for (let i = 0; i < prev.length; i++) {
-    const a = prev[i];
-    const b = next[i];
-    if (
-      a.id !== b.id ||
-      a.name !== b.name ||
-      a.updatedAt !== b.updatedAt ||
-      a.pinned !== b.pinned ||
-      a.generating !== b.generating ||
-      a.status !== b.status ||
-      a.archived !== b.archived
-    ) {
-      return false;
-    }
-  }
-  return true;
-}
 
 /** Sessions from QwenPaw backend include extra fields beyond the runtime UI type */
 export interface ExtendedChatSession extends IAgentScopeRuntimeWebUISession {
@@ -60,6 +33,9 @@ export interface ExtendedChatSession extends IAgentScopeRuntimeWebUISession {
   pinned?: boolean;
   archivedAt?: string | null;
   archived?: boolean;
+  accessRole?: "owner" | "viewer";
+  readOnly?: boolean;
+  sharedBy?: string | null;
 }
 
 /** Resolve the real backend UUID from an extended session (id may be a local timestamp) */
@@ -84,6 +60,7 @@ export const formatCreatedAt = (raw: string | null | undefined): string => {
 };
 
 interface UseSessionListDataOptions {
+  search?: string;
   /** Whether to start fetching (works like `open` in the drawer) */
   active: boolean;
   /** Current session id — used to determine active item and block no-op clicks */
@@ -95,6 +72,10 @@ interface UseSessionListDataOptions {
 }
 
 export interface SessionListData {
+  hasMore: boolean;
+  loadMore: () => Promise<void>;
+  retry: () => Promise<void>;
+  error: string;
   sortedSessions: ExtendedChatSession[];
   loading: boolean;
   /** ID of session whose switch is in flight (null = none) */
@@ -133,12 +114,11 @@ export function useSessionListData(
   const { t } = useTranslation();
   const { message } = useAppMessage();
   const { active, currentSessionId, onSessionClick } = opts;
-  // Re-fetch immediately when the selected agent changes — the shared store
-  // is cleared synchronously on the switch and must be repopulated for the
-  // new agent without waiting for the next poll tick.
-  const selectedAgent = useAgentStore((s) => s.selectedAgent);
-
-  const [loading, setLoading] = useState(true);
+  const page = useChatListPages(
+    { search: opts.search ?? "", archived: false },
+    active,
+  );
+  const { loading, refresh: refreshSessions } = page;
   const [switchingSessionId, setSwitchingSessionId] = useState<string | null>(
     null,
   );
@@ -153,69 +133,21 @@ export function useSessionListData(
   /** Cache last polled sessions to skip no-op state updates */
   const lastSessionsRef = useRef<ExtendedChatSession[]>([]);
 
-  const refreshSessions = useCallback(async () => {
-    const owner = sessionApi.getActiveOwner();
-    try {
-      const list = await sessionApi.getSessionList();
-      // Never publish a list that finished loading under a previous agent.
-      if (!sessionApi.isActiveOwner(owner)) return;
-      const extended = list as ExtendedChatSession[];
+  useEffect(() => {
+    lastSessionsRef.current = [];
+    if (active) setSessions([]);
+  }, [active, page.key, setSessions]);
+  useEffect(() => {
+    if (!page.loaded) return;
+    const extended = sessionApi.rememberChatPage(
+      page.items,
+    ) as ExtendedChatSession[];
+    if (!areSessionListsEqual(lastSessionsRef.current, extended)) {
+      lastSessionsRef.current = extended;
       setSessions(extended);
       syncSessionsGlobal(extended);
-    } catch (err) {
-      console.error("useSessionListData: failed to fetch sessions", err);
     }
-  }, [setSessions]);
-
-  useEffect(() => {
-    if (!active) return;
-    let cancelled = false;
-    const owner = sessionApi.getActiveOwner();
-
-    const fetchSessions = async () => {
-      setLoading(true);
-      try {
-        const list = await sessionApi.getSessionList();
-        if (!cancelled && sessionApi.isActiveOwner(owner)) {
-          const extended = list as ExtendedChatSession[];
-          if (!sessionsEqual(lastSessionsRef.current, extended)) {
-            lastSessionsRef.current = extended;
-            setSessions(extended);
-            syncSessionsGlobal(extended);
-          }
-        }
-      } catch (err) {
-        console.error("useSessionListData: failed to fetch sessions", err);
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    };
-
-    void fetchSessions();
-
-    const timer = setInterval(async () => {
-      // Pause polling during session switch to avoid bandwidth contention
-      if (sessionApi.isSessionSwitching) return;
-      try {
-        const list = await sessionApi.getSessionList();
-        if (!cancelled && sessionApi.isActiveOwner(owner)) {
-          const extended = list as ExtendedChatSession[];
-          if (!sessionsEqual(lastSessionsRef.current, extended)) {
-            lastSessionsRef.current = extended;
-            setSessions(extended);
-            syncSessionsGlobal(extended);
-          }
-        }
-      } catch {
-        // ignore polling errors
-      }
-    }, 3000);
-
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
-  }, [active, setSessions, selectedAgent]);
+  }, [page.items, page.loaded, setSessions]);
 
   const resolvedSessions = useMemo(() => {
     return sessions.filter((s) => {
@@ -285,31 +217,18 @@ export function useSessionListData(
       // navigation). A delete that finished after an agent switch must not
       // touch the new agent's state.
       if (!sessionApi.isActiveOwner(owner)) return;
-      sessionApi.onSessionRemoved?.(backendId ?? sessionId);
-
-      // Fetch fresh session list after deletion
-      const freshList =
-        (await sessionApi.getSessionList()) as ExtendedChatSession[];
+      sessionApi.invalidateSessionAccess(backendId ?? sessionId);
+      const remaining = sessions.filter((item) => item.id !== sessionId);
+      setSessions(remaining);
+      syncSessionsGlobal(remaining);
+      await refreshSessions();
       if (!sessionApi.isActiveOwner(owner)) return;
-      setSessions(freshList);
-      syncSessionsGlobal(freshList);
-
-      // Post-deletion check: if the currently displayed session no longer
-      // exists in the refreshed list, navigate to a new blank chat.
-      // This avoids all ID-format mismatch issues between URL chatId,
-      // session.id, and session.realId.
-      if (currentSessionId) {
-        const stillExists = freshList.some(
-          (s) =>
-            s.id === currentSessionId ||
-            (s as ExtendedChatSession).realId === currentSessionId,
-        );
-        if (!stillExists) {
-          window.dispatchEvent(new CustomEvent("qwenpaw:sidebar-new-chat"));
-        }
+      // A paged list cannot prove that an unrelated deep-linked chat was deleted.
+      if (currentSessionId === sessionId || currentSessionId === backendId) {
+        window.dispatchEvent(new CustomEvent("qwenpaw:sidebar-new-chat"));
       }
     },
-    [sessions, currentSessionId, setSessions],
+    [sessions, currentSessionId, setSessions, refreshSessions],
   );
 
   const handleEditStart = useCallback(
@@ -457,6 +376,10 @@ export function useSessionListData(
   ]);
 
   return {
+    hasMore: page.hasMore,
+    loadMore: page.loadMore,
+    retry: page.retry,
+    error: page.error,
     sortedSessions,
     loading,
     switchingSessionId,

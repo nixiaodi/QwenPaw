@@ -5,7 +5,7 @@ import React, {
   useRef,
   useState,
 } from "react";
-import { Input, Spin } from "antd";
+import { Button, Input, Spin } from "antd";
 import { VariableSizeList, type ListChildComponentProps } from "react-window";
 import { useTranslation } from "react-i18next";
 import { useLocation } from "react-router-dom";
@@ -151,6 +151,11 @@ export default function SidebarSessionList({
   const currentSessionId = getSessionIdFromPath(location.pathname) ?? undefined;
 
   const [searchQuery, setSearchQuery] = useState("");
+  const [serverSearch, setServerSearch] = useState("");
+  useEffect(() => {
+    const timer = setTimeout(() => setServerSearch(searchQuery), 300);
+    return () => clearTimeout(timer);
+  }, [searchQuery]);
   const [historyCollapsed, setHistoryCollapsed] = useState(false);
   /** Collapsed date groups — persisted so remounts keep the user's state */
   const { collapsedGroups, toggleGroup, expandGroupForSession } =
@@ -185,6 +190,10 @@ export default function SidebarSessionList({
   const {
     sortedSessions,
     loading,
+    hasMore,
+    loadMore,
+    error,
+    retry,
     editingSessionId,
     editValue,
     handleSessionClick,
@@ -197,6 +206,7 @@ export default function SidebarSessionList({
     handleEditCancel,
   } = useSessionListData(storeSessions, setSessions, {
     active: true,
+    search: serverSearch,
     currentSessionId,
     onSessionClick,
   });
@@ -426,6 +436,15 @@ export default function SidebarSessionList({
             </VariableSizeList>
           )}
         </div>
+      )}
+      {!historyCollapsed && (hasMore || error) && (
+        <Button
+          size="small"
+          loading={loading}
+          onClick={error ? retry : loadMore}
+        >
+          {error ? t("common.retry", "重试") : t("common.loadMore", "加载更多")}
+        </Button>
       )}
     </div>
   );

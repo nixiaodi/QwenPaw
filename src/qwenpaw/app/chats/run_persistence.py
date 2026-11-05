@@ -420,21 +420,28 @@ class PostgresChatRunPersistence:
         self, payload: dict[str, Any], run_id: UUID, sequence: int
     ) -> dict[str, Any]:
         encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        encoded_bytes = encoded.encode("utf-8")
         if (
             self._payload_storage_dir is None
-            or len(encoded.encode("utf-8")) <= self._inline_payload_limit
+            or len(encoded_bytes) <= self._inline_payload_limit
         ):
             return payload
         target = self._payload_storage_dir / f"{run_id}-{sequence}.json"
         await run_sync_io(target.parent.mkdir, parents=True, exist_ok=True)
         await run_sync_io(write_text_atomic, target, encoded)
-        return {
+        stored = {
             "qwenpaw_payload_ref": {
                 "path": target.name,
-                "byte_size": len(encoded.encode("utf-8")),
-                "sha256": hashlib.sha256(encoded.encode("utf-8")).hexdigest(),
+                "byte_size": len(encoded_bytes),
+                "sha256": hashlib.sha256(encoded_bytes).hexdigest(),
             }
         }
+        from .history import build_tool_history_preview
+
+        preview = build_tool_history_preview(payload)
+        if preview is not None:
+            stored["qwenpaw_history_preview"] = preview
+        return stored
 
     async def load_event_payload(
         self, stored_payload: dict[str, Any]

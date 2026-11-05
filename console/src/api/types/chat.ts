@@ -24,6 +24,23 @@ export interface Message {
   [key: string]: unknown;
 }
 
+export interface ChatListPage {
+  items: ChatSpec[];
+  has_more: boolean;
+  next_cursor: string | null;
+}
+
+export interface ChatListQuery {
+  session_id?: string;
+  page_size?: number;
+  cursor?: string | null;
+  search?: string;
+  owner_query?: string;
+  channel?: string;
+  archived?: boolean;
+  scope?: "all" | "owned" | "shared";
+}
+
 export interface ChatHistory {
   messages: Message[];
   has_more?: boolean;

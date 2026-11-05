@@ -4,7 +4,7 @@
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -49,6 +49,7 @@ class PluginEntryPoints(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     frontend: Optional[str] = None
+    frontend_runtime: Literal["legacy", "worker-v1"] = "legacy"
     backend: Optional[str] = None
 
 

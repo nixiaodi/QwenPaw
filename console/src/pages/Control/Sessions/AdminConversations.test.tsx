@@ -53,6 +53,7 @@ beforeEach(async () => {
     ] as never,
   });
   vi.mocked(agentsApi.listAdminConversations).mockResolvedValue({
+    has_more: false, next_cursor: null,
     conversations: [
       {
         id: "chat-1",
@@ -104,6 +105,7 @@ it("shows conversations for an Agent outside the user's store and opens read-onl
   expect(agentsApi.listAdminConversations).toHaveBeenCalledWith(
     "other",
     expect.any(AbortSignal),
+    { cursor: null, search: "" },
   );
   fireEvent.click(screen.getByRole("button", { name: "查看详情" }));
   expect(await screen.findByText("用户的问题")).toBeInTheDocument();

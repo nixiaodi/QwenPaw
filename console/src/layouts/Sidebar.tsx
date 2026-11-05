@@ -38,6 +38,8 @@ import {
 } from "../stores/sessionListStore";
 import { useSidebarModeStore } from "../stores/sidebarModeStore";
 import { useAuthStore } from "../stores/authStore";
+import { schedulePolling } from "../utils/polling";
+import { useConsolePush } from "../hooks/useConsolePush";
 import { buildChatPath, getSessionIdFromPath } from "../utils/sessionRoute";
 import { useAgentStore } from "../stores/agentStore";
 import sessionApi from "../pages/Chat/sessionApi";
@@ -122,6 +124,7 @@ interface SidebarProps {
 // ── Sidebar ───────────────────────────────────────────────────────────────
 
 export default function Sidebar({ selectedKey }: SidebarProps) {
+  const push = useConsolePush();
   const navigate = useNavigate();
   const location = useLocation();
   const { t } = useTranslation();
@@ -261,37 +264,31 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
     };
   }, []);
   useEffect(() => {
-    const loadUnreadState = async () => {
-      try {
-        const [inboxRes, pushRes] = await Promise.all([
-          api.getInboxEvents({
-            unread_only: true,
-            limit: 1,
-          }),
-          api.getPushMessages(),
-        ]);
-        const hasUnreadEvents = (inboxRes?.events?.length || 0) > 0;
-        const approvals = pushRes?.pending_approvals || [];
-        const currentIds = new Set(
-          approvals.map((a: { request_id: string }) => a.request_id),
-        );
-        currentApprovalIdsRef.current = currentIds;
-        const hasNewApprovals =
-          currentIds.size > 0 &&
-          [...currentIds].some((id) => !seenApprovalIdsRef.current.has(id));
-        setShakeInbox(hasNewApprovals);
-        setHasUnreadMessages(hasUnreadEvents);
-        setHasPendingApprovals(currentIds.size > 0);
-      } catch {
-        // Keep previous state when polling fails.
-      }
+    const loadUnreadState = async (signal: AbortSignal) => {
+      const inboxRes = await api.getInboxEvents(
+        { unread_only: true, limit: 1 },
+        signal,
+      );
+      if (signal.aborted) return;
+      const hasUnreadEvents = (inboxRes?.events?.length || 0) > 0;
+      setHasUnreadMessages(hasUnreadEvents);
     };
-    void loadUnreadState();
-    const timer = window.setInterval(() => {
-      void loadUnreadState();
-    }, INBOX_BADGE_POLLING_MS);
-    return () => window.clearInterval(timer);
-  }, []);
+    setHasUnreadMessages(false);
+    return schedulePolling(loadUnreadState, {
+      intervalMs: INBOX_BADGE_POLLING_MS,
+    });
+  }, [selectedAgent, authUser?.id]);
+
+  useEffect(() => {
+    const approvals = push?.pending_approvals || [];
+    const currentIds = new Set(approvals.map((a) => a.request_id));
+    currentApprovalIdsRef.current = currentIds;
+    const hasNewApprovals =
+      currentIds.size > 0 &&
+      [...currentIds].some((id) => !seenApprovalIdsRef.current.has(id));
+    setShakeInbox(hasNewApprovals);
+    setHasPendingApprovals(currentIds.size > 0);
+  }, [push]);
 
   // ── Pre-fetch sessions on mount ───────────────────────────────────────────
   // On mobile the sidebar starts collapsed so SidebarSessionList is unmounted

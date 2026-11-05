@@ -64,7 +64,9 @@ vi.mock("@agentscope-ai/chat", () => ({
 }));
 
 vi.mock("@/api/modules/chat", () => ({
-  chatApi: { deleteChat: mockDeleteChat, updateChat: mockUpdateChat },
+  chatApi: { deleteChat: mockDeleteChat, updateChat: mockUpdateChat,
+    listChatPage: vi.fn(async () => ({ items: await mockGetSessionList(), has_more: false, next_cursor: null })),
+  },
   sessionApi: {
     listChats: vi.fn(),
     createChat: vi.fn(),
@@ -79,6 +81,8 @@ vi.mock("@/api/modules/chat", () => ({
 vi.mock("../../sessionApi", () => ({
   default: {
     getSessionList: mockGetSessionList,
+    rememberChatPage: vi.fn((items) => items),
+    invalidateSessionAccess: vi.fn(),
     isSessionSwitching: false,
     startNewSwitch: vi.fn(() => ({ signal: { aborted: false } })),
     preloadSession: vi.fn().mockResolvedValue({ session: {}, realId: null }),

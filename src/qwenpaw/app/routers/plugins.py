@@ -156,6 +156,7 @@ def _list_plugins_from_disk() -> list[dict]:
                 "loaded": False,
                 "plugin_type": disk_manifest.plugin_type,
                 "frontend_entry": frontend_entry,
+                "frontend_runtime": disk_manifest.entry.frontend_runtime,
             },
         )
     return result

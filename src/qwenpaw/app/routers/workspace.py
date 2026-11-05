@@ -36,7 +36,9 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.responses import ORJSONResponse, Response, StreamingResponse
-from watchfiles import awatch, Change
+from watchfiles import Change
+
+from ...utils.file_watcher import isolated_awatch as awatch
 from pydantic import BaseModel, Field
 
 from ..utils import (

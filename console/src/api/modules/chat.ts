@@ -1,4 +1,5 @@
 import { request } from "../request";
+import { requestChatPage } from "../chatPageRequests";
 import { getApiUrl, getApiToken } from "../config";
 import { buildAuthHeaders } from "../authHeaders";
 import type {
@@ -140,6 +141,11 @@ export const chatApi = {
     const path = `${FILES_PREVIEW}/${cleaned}`;
     return withApiToken(getApiUrl(path));
   },
+  listChatPage: requestChatPage,
+
+  getChatSpec: (chatId: string, signal?: AbortSignal) =>
+    request<ChatSpec>(`/chats/${encodeURIComponent(chatId)}/spec`, { signal }),
+
   listChats: (params?: {
     user_id?: string;
     channel?: string;

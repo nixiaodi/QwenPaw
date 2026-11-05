@@ -1,25 +1,12 @@
 import { createRoot } from "react-dom/client";
 import App from "./App.tsx";
-import "./i18n";
-import { installHostExternals } from "./plugins/hostExternals";
-import { installHostSdk } from "./plugins/hostSdk/install";
-import { registerBuiltinCards } from "./components/Chat/ToolCards/registerBuiltinCards";
+import { i18nReady } from "./i18n";
 // Bare side-effect imports: each file self-registers its data into
 // menuRegistry / routeRegistry so consumers' first render sees them.
 import "./layouts/registry/builtinMenu";
 import "./layouts/registry/builtinRoutes.tsx";
 
-// Expose host dependencies (React, antd, etc.) on window
-// so that plugin UI modules can use them without bundling their own copies.
-installHostExternals();
-
-// Attach window.QwenPaw.chat (Chat customization), extend
-// window.QwenPaw.host with hooks + fetch, attach window.QwenPaw.audit.
-installHostSdk();
-
-// Register built-in tool card renderers into the PluginSystem
-// so ChatV1 (@agentscope-ai/chat) picks them up via customToolRenderConfig.
-registerBuiltinCards();
+// Plugin host dependencies are installed after authentication, before plugin execution.
 
 // Pages register their exports through lazyWithRetry only when visited.
 
@@ -64,4 +51,7 @@ if (typeof window !== "undefined") {
   };
 }
 
-createRoot(document.getElementById("root")!).render(<App />);
+// Keep the HTML loading status visible until the selected dictionary is ready.
+void i18nReady.then(() => {
+  createRoot(document.getElementById("root")!).render(<App />);
+});

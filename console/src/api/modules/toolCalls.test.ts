@@ -48,7 +48,9 @@ describe("toolCallsApi", () => {
 
   it("getInfo and cancel use session-scoped paths", async () => {
     await toolCallsApi.getInfo("backend-sid", "tc-9");
-    expect(request).toHaveBeenCalledWith("/tool-calls/backend-sid/tc-9");
+    expect(request).toHaveBeenCalledWith("/tool-calls/backend-sid/tc-9", {
+      signal: undefined,
+    });
 
     await toolCallsApi.cancel("backend-sid", "tc-9");
     expect(request).toHaveBeenCalledWith(

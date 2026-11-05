@@ -261,44 +261,44 @@ export async function withSendLock<T>(
  *   owner / active sender).
  * - Holds the lock until `abortSignal` is aborted (e.g. on component unmount
  *   or when the queueSessionId changes).
- * - Other tabs requesting the same lock will wait; when the current owner
- *   releases (page closed, navigated away, signal aborted), one of the
- *   waiters automatically becomes the new owner.
+ * - A contending caller receives "unavailable" and may retry. Only an actual
+ *   lock conflict means another tab owns sending; API errors are propagated.
  * - Falls back to immediate ownership when Web Locks are unavailable, so
  *   single-tab functionality is preserved.
  */
-export function holdOwnershipLock(
+export async function holdOwnershipLock(
   sessionId: string,
   onAcquired: () => void,
   abortSignal: AbortSignal,
-): Promise<void> {
+): Promise<"released" | "unavailable" | "unsupported"> {
+  if (abortSignal.aborted) return "released";
   const locks = getLockManager();
   if (!locks) {
     onAcquired();
-    return Promise.resolve();
+    return "unsupported";
   }
-  return locks
-    .request(
-      `qwenpaw:queue-owner:${sessionId}`,
-      { mode: "exclusive", signal: abortSignal },
-      async (lock: unknown) => {
-        if (!lock) return;
-        if (abortSignal.aborted) return;
-        onAcquired();
-        // Hold the lock until the caller aborts.
-        await new Promise<void>((resolve) => {
-          if (abortSignal.aborted) {
-            resolve();
-            return;
-          }
-          abortSignal.addEventListener("abort", () => resolve(), {
-            once: true,
-          });
+  return (await locks.request(
+    `qwenpaw:queue-owner:${sessionId}`,
+    // Web Locks does not permit signal together with ifAvailable. The
+    // callback checks cancellation and uses the signal to release ownership.
+    { mode: "exclusive", ifAvailable: true },
+    async (lock: unknown) => {
+      if (abortSignal.aborted) return "released";
+      if (!lock) return "unavailable";
+      onAcquired();
+      // Hold the lock until the caller aborts.
+      await new Promise<void>((resolve) => {
+        if (abortSignal.aborted) {
+          resolve();
+          return;
+        }
+        abortSignal.addEventListener("abort", () => resolve(), {
+          once: true,
         });
-      },
-    )
-    .then(() => undefined)
-    .catch(() => undefined);
+      });
+      return "released";
+    },
+  )) as "released" | "unavailable";
 }
 
 // ---------------------------------------------------------------------------

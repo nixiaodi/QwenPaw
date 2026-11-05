@@ -13,15 +13,15 @@ vi.mock("../../../api", () => ({
 }));
 vi.mock("../../../api/modules/chat", () => ({
   chatApi: {
-    listChats: vi.fn(),
+    listChatPage: vi.fn(),
     archiveChat: vi.fn(),
     unarchiveChat: vi.fn(),
     batchArchiveChats: vi.fn(),
     batchUnarchiveChats: vi.fn(),
   },
 }));
-vi.mock("../../../stores/agentStore", () => ({
-  useAgentStore: vi.fn(() => ({ selectedAgent: "agent-1" })),
+vi.mock("../../../stores/chatSessionScope", () => ({
+  getAgentAccessScopeKey: () => "agent-1", subscribeChatSessionScope: () => () => {},
 }));
 vi.mock("../../../hooks/useAppMessage", () => ({
   useAppMessage: vi.fn(() => ({ message: mockMessage })),
@@ -43,8 +43,8 @@ describe("useSessions", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    (chatApi.listChats as ReturnType<typeof vi.fn>).mockResolvedValue(
-      mockSessions,
+    (chatApi.listChatPage as ReturnType<typeof vi.fn>).mockResolvedValue(
+      { items: mockSessions, has_more: false, next_cursor: null },
     );
   });
 
@@ -67,7 +67,7 @@ describe("useSessions", () => {
       expect(result.current.loading).toBe(false);
     });
 
-    expect(chatApi.listChats).toHaveBeenCalledWith({ scope: "all" });
+    expect(chatApi.listChatPage).toHaveBeenCalledWith(expect.objectContaining({ scope: "all", page_size: 20 }), expect.any(AbortSignal));
     expect(result.current.sessions).toEqual(mockSessions);
   });
 
@@ -78,7 +78,7 @@ describe("useSessions", () => {
     act(() => result.current.setAccessScope("owned"));
 
     await waitFor(() =>
-      expect(chatApi.listChats).toHaveBeenLastCalledWith({ scope: "owned" }),
+      expect(chatApi.listChatPage).toHaveBeenLastCalledWith(expect.objectContaining({ scope: "owned" }), expect.any(AbortSignal)),
     );
   });
 
@@ -89,7 +89,7 @@ describe("useSessions", () => {
     act(() => result.current.setAccessScope("shared"));
 
     await waitFor(() =>
-      expect(chatApi.listChats).toHaveBeenLastCalledWith({ scope: "shared" }),
+      expect(chatApi.listChatPage).toHaveBeenLastCalledWith(expect.objectContaining({ scope: "shared" }), expect.any(AbortSignal)),
     );
   });
 
@@ -109,6 +109,7 @@ describe("useSessions", () => {
 
     let returnValue: boolean | undefined;
     await act(async () => {
+      (chatApi.listChatPage as ReturnType<typeof vi.fn>).mockResolvedValue({ items: [updatedSession, mockSessions[1]], has_more: false, next_cursor: null });
       returnValue = await result.current.updateSession("s1", {
         name: "Updated Session 1",
       });
@@ -155,6 +156,7 @@ describe("useSessions", () => {
 
     let returnValue: boolean | undefined;
     await act(async () => {
+      (chatApi.listChatPage as ReturnType<typeof vi.fn>).mockResolvedValue({ items: [mockSessions[1]], has_more: false, next_cursor: null });
       returnValue = await result.current.deleteSession("s1");
     });
 
@@ -199,6 +201,7 @@ describe("useSessions", () => {
 
     let returnValue: boolean | undefined;
     await act(async () => {
+      (chatApi.listChatPage as ReturnType<typeof vi.fn>).mockResolvedValue({ items: [mockSessions[1]], has_more: false, next_cursor: null });
       returnValue = await result.current.batchDeleteSessions(["s1"]);
     });
 

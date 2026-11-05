@@ -7,6 +7,7 @@ import logging
 import os
 import shutil
 import uuid
+from threading import Lock
 from pathlib import Path
 
 from .base import BaseChatRepository
@@ -44,6 +45,9 @@ class JsonChatRepository(BaseChatRepository):
         if isinstance(path, str):
             path = Path(path)
         self._path = path.expanduser()
+        self._list_index_lock = Lock()
+        self._list_signature = None
+        self._list_index = []
 
     @property
     def path(self) -> Path:
@@ -63,6 +67,31 @@ class JsonChatRepository(BaseChatRepository):
             ChatsFile with all chat specs
         """
         return await run_sync_io(self._load_sync)
+
+    def _index_signature(self):
+        try:
+            stat = self._path.stat()
+        except FileNotFoundError:
+            return None
+        return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
+
+    async def list_chat_candidates(self, **filters):
+        """复用未变化的运行索引，仅复制当前批次；不缓存权限结果。"""
+        from ..list_paging import chat_sort_key, select_candidates
+
+        def read_candidates():
+            with self._list_index_lock:
+                signature = self._index_signature()
+                if signature != self._list_signature:
+                    index = sorted(self._load_sync().chats, key=chat_sort_key, reverse=True)
+                    # 文件原子替换期间读到的快照仍可使用，但不能用新签名缓存旧内容。
+                    if signature == self._index_signature():
+                        self._list_index, self._list_signature = index, signature
+                else:
+                    index = self._list_index
+                return select_candidates(index, **filters)
+
+        return await run_sync_io(read_candidates)
 
     def _save_sync(self, chats_file: ChatsFile) -> None:
         """Serialize and atomically save chat specs in one worker thread."""

@@ -4,7 +4,7 @@ import {
   bailianDarkTheme,
   bailianTheme,
 } from "@agentscope-ai/design";
-import { App as AntdApp } from "antd";
+import { Alert, App as AntdApp } from "antd";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -22,15 +22,15 @@ import "dayjs/locale/ja";
 import "dayjs/locale/ru";
 import "dayjs/locale/id";
 dayjs.extend(relativeTime);
-import MainLayout from "./layouts/MainLayout";
 import { ThemeProvider, useTheme } from "./contexts/ThemeContext";
 import { PluginProvider, usePlugins } from "./plugins/PluginContext";
 import { ApprovalProvider } from "./contexts/ApprovalContext";
 import { DesktopUpdateProvider } from "./contexts/DesktopUpdateContext";
 import { UpdateTakeoverGate } from "./components/UpdateTakeoverPage";
-import { Suspense, lazy } from "react";
-import { lazyImportWithRetry } from "./utils/lazyWithRetry";
+import { Suspense } from "react";
+import { lazyImportWithRetry, lazyWithRetry } from "./utils/lazyWithRetry";
 import LoadingStatus from "./components/LoadingStatus";
+import { ChunkErrorBoundary } from "./components/ChunkErrorBoundary";
 import {
   getLoginHref,
   getLoginPath,
@@ -39,9 +39,22 @@ import {
 } from "./utils/navigationMode";
 
 const LoginPage = lazyImportWithRetry("./pages/Login/index");
-// Desktop OS shell. Uses React.lazy (not lazyImportWithRetry, which only
-// resolves the ./pages/** glob) so it can load from ./os/.
-const DesktopOSPage = lazy(() => import("./os/DesktopOS"));
+// Login does not need the application shell or tool renderers. Register cards
+// before either shell mounts; external plugin overrides retain their priority.
+async function withBuiltinCards<T>(factory: () => Promise<T>): Promise<T> {
+  const [module, cards] = await Promise.all([
+    factory(),
+    import("./components/Chat/ToolCards/registerBuiltinCards"),
+  ]);
+  cards.registerBuiltinCards();
+  return module;
+}
+const MainLayout = lazyWithRetry(() =>
+  withBuiltinCards(() => import("./layouts/MainLayout")),
+);
+const DesktopOSPage = lazyWithRetry(() =>
+  withBuiltinCards(() => import("./os/DesktopOS")),
+);
 import { languageApi } from "./api/modules/language";
 import { useUploadLimitStore } from "./stores/uploadLimitStore";
 import { useAuthStore } from "./stores/authStore";
@@ -106,7 +119,7 @@ function AppInner() {
   const basename = getRouterBasename(window.location.pathname);
   const { i18n } = useTranslation();
   const { isDark } = useTheme();
-  const { loading: pluginsLoading } = usePlugins();
+  const { loading: pluginsLoading, error: pluginError } = usePlugins();
   const authPhase = useAuthStore((state) => state.phase);
   const authMode = useAuthStore((state) => state.mode);
   const preferredLanguage = useAuthStore(
@@ -182,8 +195,9 @@ function AppInner() {
     return interceptBlankLinkClicks();
   }, []);
 
-  // Wait for plugins to load before rendering routes that might be patched
-  if (pluginsLoading) {
+  // Isolated plugins cannot patch core pages. Only a direct plugin URL needs
+  // its registrations before the router can resolve the page.
+  if (pluginsLoading && window.location.pathname.includes("/plugin/")) {
     return <LoadingStatus />;
   }
 
@@ -194,9 +208,11 @@ function AppInner() {
   // <Router> inside another. The classic browser layout keeps its BrowserRouter.
   const routedContent = osActive ? (
     <AuthGuard useHardRedirect>
-      <Suspense fallback={<LoadingStatus />}>
-        <DesktopOSPage />
-      </Suspense>
+      <ChunkErrorBoundary resetKey="desktop-shell">
+        <Suspense fallback={<LoadingStatus />}>
+          <DesktopOSPage />
+        </Suspense>
+      </ChunkErrorBoundary>
     </AuthGuard>
   ) : (
     <BrowserRouter basename={basename}>
@@ -213,7 +229,11 @@ function AppInner() {
           path="/*"
           element={
             <AuthGuard>
-              <MainLayout />
+              <ChunkErrorBoundary resetKey="main-shell">
+                <Suspense fallback={<LoadingStatus />}>
+                  <MainLayout />
+                </Suspense>
+              </ChunkErrorBoundary>
             </AuthGuard>
           }
         />
@@ -240,6 +260,12 @@ function AppInner() {
         }}
       >
         <AntdApp>
+          {pluginError && (authPhase === "authenticated" || authPhase === "disabled") && (
+            <Alert key={pluginError} type="warning" showIcon closable
+              message="部分前端插件未加载"
+              description={<details><summary>查看原因</summary>{pluginError}</details>}
+              style={{ position: "fixed", bottom: 16, right: 16, maxWidth: 520, zIndex: 2000 }} />
+          )}
           <CloseWindowPrompt />
           <DesktopUpdateProvider>
             <UpdateTakeoverGate>

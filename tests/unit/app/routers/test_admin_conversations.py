@@ -13,6 +13,28 @@ from qwenpaw.identity.models import PlatformRole
 from qwenpaw.app.routers import agent_members
 
 
+@pytest.mark.asyncio
+async def test_admin_pages_bind_cursor_to_agent_user_and_search(monkeypatch):
+    from datetime import datetime, timezone
+    from fastapi import HTTPException
+    actor = ActorContext(uuid4(), ActorType.USER, PlatformRole.ADMIN, False, "test")
+    rows = [{"id": uuid4(), "updated_at": datetime.now(timezone.utc)} for _ in range(21)]
+    repository = SimpleNamespace(list_conversations_for_admin=AsyncMock(return_value=rows))
+    monkeypatch.setattr(agent_members, "get_admin_conversation_repository", lambda _: repository)
+    service = SimpleNamespace(require_admin_agent=AsyncMock())
+    first = await agent_members.list_admin_conversations("a", actor, service, page_size=20, search="test")
+    assert len(first["conversations"]) == 20
+    assert first["has_more"] and first["next_cursor"]
+    assert repository.list_conversations_for_admin.call_args.kwargs == {"limit": 21, "after": None, "search": "test"}
+    await agent_members.list_admin_conversations("a", actor, service, page_size=20, search="test", cursor=first["next_cursor"])
+    after = repository.list_conversations_for_admin.call_args.kwargs["after"]
+    assert after[1] == rows[19]["id"]
+    assert after[0] == rows[19]["updated_at"]
+    with pytest.raises(HTTPException) as caught:
+        await agent_members.list_admin_conversations("b", actor, service, page_size=20, search="test", cursor=first["next_cursor"])
+    assert caught.value.status_code == 400
+
+
 @pytest.mark.parametrize("suffix", ["", "/11111111-1111-1111-1111-111111111111"])
 def test_member_cannot_inspect_conversations(suffix):
     app = FastAPI()

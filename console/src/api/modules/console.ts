@@ -60,22 +60,26 @@ export interface PendingApproval {
 }
 
 export const consoleApi = {
-  getPushMessages: (sessionId?: string) =>
+  getPushMessages: (sessionId?: string, signal?: AbortSignal) =>
     request<{ messages: PushMessage[]; pending_approvals: PendingApproval[] }>(
       sessionId
-        ? `/console/push-messages?session_id=${sessionId}`
+        ? `/console/push-messages?session_id=${encodeURIComponent(sessionId)}`
         : "/console/push-messages",
+      ...(signal ? [{ signal }] : []),
     ),
 
-  getInboxEvents: (params?: {
-    limit?: number;
-    offset?: number;
-    source_type?: string;
-    source_types?: string[];
-    status?: string;
-    agent_id?: string;
-    unread_only?: boolean;
-  }) => {
+  getInboxEvents: (
+    params?: {
+      limit?: number;
+      offset?: number;
+      source_type?: string;
+      source_types?: string[];
+      status?: string;
+      agent_id?: string;
+      unread_only?: boolean;
+    },
+    signal?: AbortSignal,
+  ) => {
     const query = new URLSearchParams();
     if (params?.limit !== undefined) query.set("limit", String(params.limit));
     if (params?.offset !== undefined)
@@ -94,7 +98,7 @@ export const consoleApi = {
       events: InboxEvent[];
       total?: number;
       unread_count?: number;
-    }>(`/console/inbox/events${suffix}`);
+    }>(`/console/inbox/events${suffix}`, ...(signal ? [{ signal }] : []));
   },
 
   markInboxRead: (payload: { event_ids?: string[]; all?: boolean }) =>

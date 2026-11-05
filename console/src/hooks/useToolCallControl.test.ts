@@ -48,6 +48,20 @@ describe("useToolCallControl", () => {
     vi.useRealTimers();
   });
 
+  it("does not flood a slow status endpoint during tool startup", async () => {
+    getInfo.mockReturnValue(new Promise(() => {}));
+    getOffloadPolicy.mockReturnValue(new Promise(() => {}));
+    const view = renderHook(() =>
+      useToolCallControl("backend-sid", "slow-tool", true),
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000);
+    });
+    expect(getInfo).toHaveBeenCalledTimes(1);
+    expect(getOffloadPolicy).toHaveBeenCalledTimes(1);
+    view.unmount();
+  });
+
   it("keeps killRemaining ticking after offload countdown hits zero", async () => {
     let nowMs = 0;
     vi.spyOn(performance, "now").mockImplementation(() => nowMs);
@@ -147,7 +161,11 @@ describe("useToolCallControl", () => {
       await Promise.resolve();
     });
 
-    expect(getInfo).toHaveBeenCalledWith("backend-ready", "tc-retry");
+    expect(getInfo).toHaveBeenCalledWith(
+      "backend-ready",
+      "tc-retry",
+      expect.any(AbortSignal),
+    );
     expect(result.current.offloadRemaining).toBe(12);
     expect(result.current.killRemaining).toBe(40);
   });

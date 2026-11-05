@@ -204,6 +204,8 @@ class ConversationRepository(ABC):
         *,
         user_id: UUID,
         scope: Literal["all", "owned", "shared"] = "all",
+        agent_id: UUID | None = None,
+        conversation_ids: list[UUID] | None = None,
     ) -> list[ConversationAccessRecord]:
         """List conversations visible to a user under the repository policy."""
         raise NotImplementedError

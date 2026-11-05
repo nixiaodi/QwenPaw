@@ -66,6 +66,7 @@ interface OsNotifyState {
   setCenter: (open: boolean) => void;
   markAllRead: () => void;
   clearHistory: () => void;
+  resetIdentity: () => void;
 }
 
 export const useOsNotify = create<OsNotifyState>((set, get) => ({
@@ -142,6 +143,15 @@ export const useOsNotify = create<OsNotifyState>((set, get) => ({
     set((s) => ({ history: s.history.map((h) => ({ ...h, read: true })) })),
 
   clearHistory: () => set({ history: [], toasts: [] }),
+  resetIdentity: () => set({
+    history: [],
+    toasts: [],
+    approvalCount: 0,
+    inboxCount: 0,
+    centerOpen: false,
+    seeded: false,
+    knownIds: new Set<string>(),
+  }),
 }));
 
 /** Count of history items not yet seen in the notification center. */

@@ -265,9 +265,11 @@ export const agentsApi = {
   listAdminAgents: () =>
     request<{ agents: AdminAgentSummary[] }>("/admin/agents"),
 
-  listAdminConversations: (agentId: string, signal?: AbortSignal) =>
-    request<{ conversations: AdminConversation[] }>(
-      `/admin/agents/${encodeURIComponent(agentId)}/conversations`,
+  listAdminConversations: (agentId: string, signal?: AbortSignal, options?: { cursor?: string | null; search?: string }) =>
+    request<{ conversations: AdminConversation[]; has_more: boolean; next_cursor: string | null }>(
+      `/admin/agents/${encodeURIComponent(agentId)}/conversations?${new URLSearchParams({
+        page_size: "20", search: options?.search ?? "", ...(options?.cursor ? { cursor: options.cursor } : {}),
+      })}`,
       { signal },
     ),
 

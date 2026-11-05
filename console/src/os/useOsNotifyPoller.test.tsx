@@ -1,5 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import { renderHook, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import type { InboxEvent } from "../api/modules/console";
 import { useOsNotify } from "./osNotifyStore";
 
@@ -13,6 +13,12 @@ vi.mock("../api", () => ({
     getInboxEvents: mockGetInboxEvents,
     getPushMessages: mockGetPushMessages,
   },
+}));
+const push = { messages: [], pending_approvals: [] };
+vi.mock("../hooks/useConsolePush", () => ({ useConsolePush: () => push }));
+vi.mock("../stores/chatSessionScope", () => ({
+  getAgentAccessScopeKey: () => "test-user",
+  subscribeChatSessionScope: () => () => {},
 }));
 
 import { useOsNotifyPoller } from "./useOsNotifyPoller";
@@ -34,6 +40,18 @@ function event(id: string, sourceType: string): InboxEvent {
 }
 
 describe("useOsNotifyPoller", () => {
+  afterEach(() => {
+    cleanup();
+    vi.useRealTimers();
+  });
+  it("does not overlap unread requests while the previous response is stalled", async () => {
+    vi.useFakeTimers();
+    mockGetInboxEvents.mockReturnValue(new Promise(() => {}));
+    const view = renderHook(() => useOsNotifyPoller());
+    await act(() => vi.advanceTimersByTimeAsync(36_000));
+    expect(mockGetInboxEvents).toHaveBeenCalledTimes(1);
+    view.unmount();
+  });
   beforeEach(() => {
     mockGetInboxEvents.mockReset();
     mockGetPushMessages.mockReset();
@@ -66,11 +84,14 @@ describe("useOsNotifyPoller", () => {
     const { unmount } = renderHook(() => useOsNotifyPoller());
 
     await waitFor(() => expect(useOsNotify.getState().seeded).toBe(true));
-    expect(mockGetInboxEvents).toHaveBeenCalledWith({
-      unread_only: true,
-      limit: 200,
-      source_types: ["cron", "heartbeat", "memory", "skill_autoupdate"],
-    });
+    expect(mockGetInboxEvents).toHaveBeenCalledWith(
+      {
+        unread_only: true,
+        limit: 200,
+        source_types: ["cron", "heartbeat", "memory", "skill_autoupdate"],
+      },
+      expect.any(AbortSignal),
+    );
     expect(useOsNotify.getState().inboxCount).toBe(12);
 
     unmount();

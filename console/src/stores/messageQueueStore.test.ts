@@ -65,12 +65,8 @@ describe("messageQueueStore", () => {
     localStorage.setItem("qwenpaw_authenticated_user_id", "user-b");
     const userBKey = getStorageKey("shared-session");
 
-    expect(userAKey).toBe(
-      "qwenpaw:message-queue:user:user-a:shared-session",
-    );
-    expect(userBKey).toBe(
-      "qwenpaw:message-queue:user:user-b:shared-session",
-    );
+    expect(userAKey).toBe("qwenpaw:message-queue:user:user-a:shared-session");
+    expect(userBKey).toBe("qwenpaw:message-queue:user:user-b:shared-session");
     expect(userAKey).not.toBe(userBKey);
   });
 
@@ -582,5 +578,25 @@ describe("messageQueueStore", () => {
 
     expect(onAcquired).toHaveBeenCalled();
     controller.abort();
+  });
+
+  it("reports a rejected ownership request instead of silently leaving the page queue-only", async () => {
+    const previous = Object.getOwnPropertyDescriptor(navigator, "locks");
+    Object.defineProperty(navigator, "locks", {
+      configurable: true,
+      value: {
+        request: vi
+          .fn()
+          .mockRejectedValue(new DOMException("blocked", "SecurityError")),
+      },
+    });
+    try {
+      await expect(
+        holdOwnershipLock(SESSION_ID, vi.fn(), new AbortController().signal),
+      ).rejects.toThrow("blocked");
+    } finally {
+      if (previous) Object.defineProperty(navigator, "locks", previous);
+      else Reflect.deleteProperty(navigator, "locks");
+    }
   });
 });

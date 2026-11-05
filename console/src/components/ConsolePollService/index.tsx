@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { MessageCircle, X } from "lucide-react";
-import { consoleApi, type PushMessage } from "../../api/modules/console";
+import type { PushMessage } from "../../api/modules/console";
 import { useApprovalContext } from "../../contexts/ApprovalContext";
+import { useConsolePush } from "../../hooks/useConsolePush";
 import styles from "./index.module.less";
 
-const POLL_INTERVAL_MS = 2500;
 const AUTO_DISMISS_MS = 8000;
 const MAX_SEEN_IDS = 500;
 const MAX_VISIBLE_BUBBLES = 4;
@@ -21,11 +21,12 @@ function getBackendSessionId(): string {
 
 export default function ConsolePollService() {
   const [items, setItems] = useState<BubbleItem[]>([]);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const seenIdsRef = useRef<Set<string>>(new Set());
   const originalTitleRef = useRef(document.title);
   const blinkRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const { setApprovals } = useApprovalContext();
+  const push = useConsolePush(true);
+  const previousApprovals = useRef("");
 
   const dismiss = (id: string) => {
     setItems((prev) => prev.filter((i) => i.id !== id));
@@ -36,59 +37,52 @@ export default function ConsolePollService() {
   }, []);
 
   useEffect(() => {
-    const prevApprovalsRef = { current: "" };
-    const tick = () => {
-      const currentSessionId = getBackendSessionId();
-      consoleApi
-        .getPushMessages(currentSessionId || undefined)
-        .then((res) => {
-          // Update pending approvals only when they actually change,
-          // to avoid triggering unnecessary re-renders in Chat component
-          // every 2.5s polling cycle.
-          if (res?.pending_approvals) {
-            const serialized = JSON.stringify(res.pending_approvals);
-            if (serialized !== prevApprovalsRef.current) {
-              prevApprovalsRef.current = serialized;
-              setApprovals(res.pending_approvals);
-            }
-          }
+    if (!push) {
+      seenIdsRef.current.clear();
+      previousApprovals.current = "";
+      setItems([]);
+      setApprovals([]);
+      return;
+    }
+    const currentSessionId = getBackendSessionId();
+    const res = push;
+    // Update pending approvals only when they actually change,
+    // to avoid triggering unnecessary re-renders in Chat component
+    // every 2.5s polling cycle.
+    if (res?.pending_approvals) {
+      const serialized = JSON.stringify(res.pending_approvals);
+      if (serialized !== previousApprovals.current) {
+        previousApprovals.current = serialized;
+        setApprovals(res.pending_approvals);
+      }
+    }
 
-          // Update message bubbles
-          if (!res?.messages?.length) return;
-          const seen = seenIdsRef.current;
-          if (seen.size > MAX_SEEN_IDS) seen.clear();
-          const newItems: BubbleItem[] = [];
-          const now = Date.now();
-          for (const m of res.messages) {
-            if (
-              currentSessionId &&
-              m.session_id &&
-              m.root_session_id &&
-              m.session_id !== currentSessionId &&
-              m.root_session_id !== currentSessionId
-            ) {
-              continue;
-            }
-            if (seen.has(m.id)) continue;
-            seen.add(m.id);
-            newItems.push({ ...m, dismissAt: now + AUTO_DISMISS_MS });
-          }
-          if (newItems.length === 0) return;
-          const toAdd = newItems.slice(-MAX_NEW_PER_POLL);
-          setItems((prev) => {
-            const merged = [...prev, ...toAdd];
-            return merged.slice(-MAX_VISIBLE_BUBBLES);
-          });
-        })
-        .catch(() => {});
-    };
-
-    tick();
-    pollRef.current = setInterval(tick, POLL_INTERVAL_MS);
-    return () => {
-      if (pollRef.current) clearInterval(pollRef.current);
-    };
-  }, []);
+    // Update message bubbles
+    if (!res?.messages?.length) return;
+    const seen = seenIdsRef.current;
+    if (seen.size > MAX_SEEN_IDS) seen.clear();
+    const newItems: BubbleItem[] = [];
+    const now = Date.now();
+    for (const m of res.messages) {
+      if (
+        currentSessionId &&
+        (m.session_id || m.root_session_id) &&
+        m.session_id !== currentSessionId &&
+        m.root_session_id !== currentSessionId
+      ) {
+        continue;
+      }
+      if (seen.has(m.id)) continue;
+      seen.add(m.id);
+      newItems.push({ ...m, dismissAt: now + AUTO_DISMISS_MS });
+    }
+    if (newItems.length === 0) return;
+    const toAdd = newItems.slice(-MAX_NEW_PER_POLL);
+    setItems((prev) => {
+      const merged = [...prev, ...toAdd];
+      return merged.slice(-MAX_VISIBLE_BUBBLES);
+    });
+  }, [push, setApprovals]);
 
   useEffect(() => {
     if (items.length === 0) return;

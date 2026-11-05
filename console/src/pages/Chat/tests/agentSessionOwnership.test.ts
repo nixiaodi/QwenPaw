@@ -1,3 +1,4 @@
+import { asChatPage } from "../../../test/chatPage";
 /**
  * Regression tests for cross-agent session ownership.
  *
@@ -146,7 +147,7 @@ describe("agent session ownership epochs", () => {
   });
 
   it("publishes resolved ids while multiple chats are still generating", async () => {
-    const listSpy = vi.spyOn(api, "listChats");
+    const listSpy = vi.spyOn(api, "listChatPage");
     const setLibrarySessions = vi.fn();
     useSessionListStore.setState({ _setLibrarySessions: setLibrarySessions });
 
@@ -155,9 +156,9 @@ describe("agent session ownership epochs", () => {
     await sessionApi.createSession(firstSpec);
     const firstTempId = firstSpec.id!;
 
-    listSpy.mockResolvedValueOnce([
+    listSpy.mockResolvedValueOnce(asChatPage([
       makeChatSpec(A_CHAT, firstTempId, "chat-1", "running"),
-    ]);
+    ]));
     sessionApi.triggerResolve(firstTempId);
     await flush();
 
@@ -165,10 +166,10 @@ describe("agent session ownership epochs", () => {
     await sessionApi.createSession(secondSpec);
     const secondTempId = secondSpec.id!;
 
-    listSpy.mockResolvedValueOnce([
+    listSpy.mockResolvedValueOnce(asChatPage([
       makeChatSpec(B_CHAT, secondTempId, "chat-2", "running"),
       makeChatSpec(A_CHAT, firstTempId, "chat-1", "running"),
-    ]);
+    ]));
     sessionApi.triggerResolve(secondTempId);
     await flush();
 
@@ -183,7 +184,7 @@ describe("agent session ownership epochs", () => {
   });
   it("does not select a background history read over the explicitly navigated chat", async () => {
     sessionApi.setActiveAgent("agent-a");
-    vi.spyOn(api, "listChats").mockResolvedValue([makeChatSpec(A_CHAT, A_CHAT), makeChatSpec(B_CHAT, B_CHAT)]);
+    vi.spyOn(api, "listChatPage").mockResolvedValue(asChatPage([makeChatSpec(A_CHAT, A_CHAT), makeChatSpec(B_CHAT, B_CHAT)]));
     vi.spyOn(api, "getChat").mockResolvedValue(makeHistory());
     await sessionApi.getSessionList();
     sessionApi.trackNavigatedSession(B_CHAT);
@@ -217,13 +218,13 @@ describe("agent session ownership epochs", () => {
   });
 
   it("revoked viewer access removes the session and notifies cleanup", async () => {
-    const listSpy = vi.spyOn(api, "listChats");
+    const listSpy = vi.spyOn(api, "listChatPage");
     const shared = {
       ...makeChatSpec(A_CHAT, "console:viewer", "shared chat"),
       access_role: "viewer",
       read_only: true,
     } as ChatSpec;
-    listSpy.mockResolvedValueOnce([shared]);
+    listSpy.mockResolvedValueOnce(asChatPage([shared]));
     sessionApi.setActiveAgent("agent-a");
     await sessionApi.getSessionList();
 
@@ -236,20 +237,20 @@ describe("agent session ownership epochs", () => {
   });
 
   it("Test A: an old agent's list request cannot replace the new agent's list", async () => {
-    const listSpy = vi.spyOn(api, "listChats");
+    const listSpy = vi.spyOn(api, "listChatPage");
     const onSessionSelected = vi.fn();
     sessionApi.onSessionSelected = onSessionSelected;
 
     // Agent A starts a list request that stays pending.
     sessionApi.setActiveAgent("agent-a");
     const dA = deferred<ChatSpec[]>();
-    listSpy.mockReturnValueOnce(dA.promise);
+    listSpy.mockReturnValueOnce(dA.promise.then(asChatPage));
     const pA = sessionApi.getSessionList();
 
     // The user switches to agent B, whose own request resolves first.
     sessionApi.setActiveAgent("agent-b");
     const dB = deferred<ChatSpec[]>();
-    listSpy.mockReturnValueOnce(dB.promise);
+    listSpy.mockReturnValueOnce(dB.promise.then(asChatPage));
     const pB = sessionApi.getSessionList();
 
     // B must not have reused A's in-flight promise.
@@ -266,14 +267,14 @@ describe("agent session ownership epochs", () => {
     expect(staleResult.map((s) => s.id)).toEqual([B_CHAT]);
 
     // A fresh call still sees B's list, not A's.
-    listSpy.mockResolvedValueOnce([makeChatSpec(B_CHAT, "console:b")]);
+    listSpy.mockResolvedValueOnce(asChatPage([makeChatSpec(B_CHAT, "console:b")]));
     const current = await sessionApi.getSessionList();
     expect(current.map((s) => s.id)).toEqual([B_CHAT]);
     expect(onSessionSelected).not.toHaveBeenCalled();
   });
 
   it("Test B: an old temp-id resolution cannot notify or persist for the new agent", async () => {
-    const listSpy = vi.spyOn(api, "listChats");
+    const listSpy = vi.spyOn(api, "listChatPage");
     const onSessionIdResolved = vi.fn();
     sessionApi.onSessionIdResolved = onSessionIdResolved;
     useAgentStore.setState({ lastChatIdByAgent: { "agent-b": B_CHAT } });
@@ -287,7 +288,7 @@ describe("agent session ownership epochs", () => {
 
     // First message sent: resolution starts but the list stays pending.
     const dResolve = deferred<ChatSpec[]>();
-    listSpy.mockReturnValueOnce(dResolve.promise);
+    listSpy.mockReturnValueOnce(dResolve.promise.then(asChatPage));
     sessionApi.triggerResolve(tempId);
 
     // The user switches to agent B before A's resolution completes.
@@ -304,19 +305,19 @@ describe("agent session ownership epochs", () => {
   });
 
   it("Test C: A -> B -> A rejects results from the first A epoch", async () => {
-    const listSpy = vi.spyOn(api, "listChats");
+    const listSpy = vi.spyOn(api, "listChatPage");
 
     // Work starts under the first A epoch.
     sessionApi.setActiveAgent("agent-a");
     const dOld = deferred<ChatSpec[]>();
-    listSpy.mockReturnValueOnce(dOld.promise);
+    listSpy.mockReturnValueOnce(dOld.promise.then(asChatPage));
     const pOld = sessionApi.getSessionList();
 
     // Switch away and back: the agent id matches again but the epoch differs.
     sessionApi.setActiveAgent("agent-b");
     sessionApi.setActiveAgent("agent-a");
     const dNew = deferred<ChatSpec[]>();
-    listSpy.mockReturnValueOnce(dNew.promise);
+    listSpy.mockReturnValueOnce(dNew.promise.then(asChatPage));
     const pNew = sessionApi.getSessionList();
     dNew.resolve([makeChatSpec(B_CHAT, "console:new-a")]);
     await pNew;
@@ -328,7 +329,7 @@ describe("agent session ownership epochs", () => {
   });
 
   it("Test D: same-owner list, selection, and temp-id resolution still work", async () => {
-    const listSpy = vi.spyOn(api, "listChats");
+    const listSpy = vi.spyOn(api, "listChatPage");
     vi.spyOn(api, "getChat").mockResolvedValue(makeHistory());
     const onSessionSelected = vi.fn();
     const onSessionIdResolved = vi.fn();
@@ -338,7 +339,7 @@ describe("agent session ownership epochs", () => {
     sessionApi.setActiveAgent("agent-a");
 
     // List loading applies normally.
-    listSpy.mockResolvedValueOnce([makeChatSpec(A_CHAT, "console:a")]);
+    listSpy.mockResolvedValueOnce(asChatPage([makeChatSpec(A_CHAT, "console:a")]));
     const list = await sessionApi.getSessionList();
     expect(list.map((s) => s.id)).toEqual([A_CHAT]);
 
@@ -351,19 +352,19 @@ describe("agent session ownership epochs", () => {
     const spec: { id?: string } = {};
     await sessionApi.createSession(spec);
     const tempId = spec.id!;
-    listSpy.mockResolvedValueOnce([
+    listSpy.mockResolvedValueOnce(asChatPage([
       makeChatSpec(B_CHAT, tempId),
       makeChatSpec(A_CHAT, "console:a"),
-    ]);
+    ]));
     sessionApi.triggerResolve(tempId);
     await flush();
     expect(onSessionIdResolved).toHaveBeenCalledWith(tempId, B_CHAT);
   });
 
   it("a stale getSession cannot rewrite window identity, turn usage, or fire selection", async () => {
-    vi.spyOn(api, "listChats").mockResolvedValue([
+    vi.spyOn(api, "listChatPage").mockResolvedValue(asChatPage([
       makeChatSpec(A_CHAT, "console:a"),
-    ]);
+    ]));
     const dChat = deferred<ChatHistory>();
     vi.spyOn(api, "getChat").mockReturnValueOnce(dChat.promise);
     const onSessionSelected = vi.fn();
@@ -395,9 +396,9 @@ describe("agent session ownership epochs", () => {
   });
 
   it("in-flight session requests and preload results are not reused across epochs", async () => {
-    vi.spyOn(api, "listChats").mockResolvedValue([
+    vi.spyOn(api, "listChatPage").mockResolvedValue(asChatPage([
       makeChatSpec(A_CHAT, "console:a"),
-    ]);
+    ]));
     const dA = deferred<ChatHistory>();
     const getChatSpy = vi
       .spyOn(api, "getChat")
@@ -426,9 +427,9 @@ describe("agent session ownership epochs", () => {
   });
 
   it("a stale preload that fails with a normal error still rejects as AbortError", async () => {
-    vi.spyOn(api, "listChats").mockResolvedValue([
+    vi.spyOn(api, "listChatPage").mockResolvedValue(asChatPage([
       makeChatSpec(A_CHAT, "console:a"),
-    ]);
+    ]));
     const dChat = deferred<ChatHistory>();
     vi.spyOn(api, "getChat").mockReturnValueOnce(dChat.promise);
 
@@ -459,7 +460,7 @@ describe("agent session ownership epochs", () => {
   });
 
   it("the previous agent's list entries cannot leak ids into the new agent's list", async () => {
-    const listSpy = vi.spyOn(api, "listChats");
+    const listSpy = vi.spyOn(api, "listChatPage");
 
     // Agent A resolves a blank local session to its backend UUID, leaving a
     // list entry with a local id and realId mapping.
@@ -467,7 +468,7 @@ describe("agent session ownership epochs", () => {
     const spec: { id?: string } = {};
     await sessionApi.createSession(spec);
     const tempId = spec.id!;
-    listSpy.mockResolvedValueOnce([makeChatSpec(A_CHAT, tempId)]);
+    listSpy.mockResolvedValueOnce(asChatPage([makeChatSpec(A_CHAT, tempId)]));
     sessionApi.triggerResolve(tempId);
     await flush();
 
@@ -475,7 +476,7 @@ describe("agent session ownership epochs", () => {
     // Merging against A's leftover entry would transfer A's local id and
     // UUID onto B's chat.
     sessionApi.setActiveAgent("agent-b");
-    listSpy.mockResolvedValueOnce([makeChatSpec(B_CHAT, tempId)]);
+    listSpy.mockResolvedValueOnce(asChatPage([makeChatSpec(B_CHAT, tempId)]));
     const list = await sessionApi.getSessionList();
 
     expect(list).toHaveLength(1);
@@ -490,8 +491,8 @@ describe("agent session ownership epochs", () => {
 
     // A sidebar-style preload starts while ownership is still unclaimed.
     const dList = deferred<ChatSpec[]>();
-    const listSpy = vi.spyOn(api, "listChats");
-    listSpy.mockReturnValueOnce(dList.promise);
+    const listSpy = vi.spyOn(api, "listChatPage");
+    listSpy.mockReturnValueOnce(dList.promise.then(asChatPage));
     const pUnclaimed = sessionApi.getSessionList();
 
     // The first claim arrives (e.g. the app resolves the selected agent).
@@ -502,7 +503,7 @@ describe("agent session ownership epochs", () => {
     expect(stale).toEqual([]);
 
     // The claimed epoch loads its own list normally.
-    listSpy.mockResolvedValueOnce([makeChatSpec(B_CHAT, "console:b")]);
+    listSpy.mockResolvedValueOnce(asChatPage([makeChatSpec(B_CHAT, "console:b")]));
     const fresh = await sessionApi.getSessionList();
     expect(fresh.map((s) => s.id)).toEqual([B_CHAT]);
   });

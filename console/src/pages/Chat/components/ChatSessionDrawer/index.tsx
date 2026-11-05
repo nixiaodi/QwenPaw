@@ -5,7 +5,7 @@ import React, {
   useRef,
   useState,
 } from "react";
-import { Drawer, Empty, Input, Spin, Tooltip } from "antd";
+import { Button, Drawer, Empty, Input, Spin, Tooltip } from "antd";
 import { VariableSizeList, type ListChildComponentProps } from "react-window";
 import { useTranslation } from "react-i18next";
 import { useNavigate, useLocation } from "react-router-dom";
@@ -46,6 +46,8 @@ import {
   findSessionRowIndex,
 } from "../../../../utils/sessionGrouping";
 import { useAppMessage } from "../../../../hooks/useAppMessage";
+import { useChatListPages } from "../../../../hooks/useChatListPages";
+import { areSessionListsEqual } from "../../sessionListEqual";
 import styles from "./index.module.less";
 import type { ChatStatus } from "../../../../api/types/chat";
 import ConversationShareDialog from "../ConversationShareDialog";
@@ -247,7 +249,6 @@ const ChatSessionDrawer: React.FC<ChatSessionDrawerProps> = (props) => {
   const navigate = useNavigate();
   const location = useLocation();
   const sdkState = useChatAnywhereSessionsState();
-  const selectedAgent = useAgentStore((state) => state.selectedAgent);
   const historicalReadOnly = useAgentStore((state) =>
     isAgentHistoricalReadOnly(state.agents, state.selectedAgent),
   );
@@ -296,7 +297,6 @@ const ChatSessionDrawer: React.FC<ChatSessionDrawerProps> = (props) => {
   const [sharingChatId, setSharingChatId] = useState<string | null>(null);
 
   /** Whether the session list is being fetched (default true because destroyOnHidden re-mounts) */
-  const [listLoading, setListLoading] = useState(true);
 
   /** Cache last polled sessions to skip no-op state updates */
   const lastPolledSessionsRef = useRef<IAgentScopeRuntimeWebUISession[]>([]);
@@ -309,9 +309,14 @@ const ChatSessionDrawer: React.FC<ChatSessionDrawerProps> = (props) => {
   const [searchInput, setSearchInput] = useState("");
   /** Debounced search query used for actual filtering (300ms delay) */
   const [searchQuery, setSearchQuery] = useState("");
-  const [accessScope, setAccessScope] = useState<
-    "all" | "owned" | "shared"
-  >("all");
+  const [accessScope, setAccessScope] = useState<"all" | "owned" | "shared">(
+    "all",
+  );
+  const page = useChatListPages(
+    { scope: accessScope, search: searchQuery, archived: false },
+    props.open,
+  );
+  const { loading: listLoading, refresh: refreshSessions } = page;
 
   /** Debounce search input to avoid excessive re-renders during fast typing */
   useEffect(() => {
@@ -353,75 +358,18 @@ const ChatSessionDrawer: React.FC<ChatSessionDrawerProps> = (props) => {
       });
   }, [resolvedSessions]);
 
-  /** Re-fetch session list from the backend and sync to context state */
-  const refreshSessions = useCallback(async () => {
-    const owner = sessionApi.getActiveOwner();
-    const list = await sessionApi.getSessionList(accessScope);
-    // Never publish a list that finished loading under a previous agent.
-    if (!sessionApi.isActiveOwner(owner)) return;
-    setSessions(list);
-  }, [setSessions, accessScope]);
-
-  /** Open drawer → refresh session list and start polling */
   useEffect(() => {
-    if (!props.open) return;
-
-    let isCancelled = false;
-    const owner = sessionApi.getActiveOwner();
-
-    // The drawer owns a local list outside the SDK context. Clear the
-    // previous agent's entries before loading the newly selected agent.
     lastPolledSessionsRef.current = [];
     setSessions([]);
-
-    const fetchSessions = async () => {
-      setListLoading(true);
-      try {
-        const list = await sessionApi.getSessionList(accessScope);
-        if (!isCancelled && sessionApi.isActiveOwner(owner)) {
-          // sessionApi already returns the previous array reference when the
-          // list hasn't changed, so a reference check is enough to skip no-op
-          // state updates and avoid a full re-render cascade.
-          if (list !== lastPolledSessionsRef.current) {
-            lastPolledSessionsRef.current = list;
-            setSessions(list);
-          }
-        }
-      } catch (error) {
-        console.error("Failed to refresh session list:", error);
-      } finally {
-        if (!isCancelled) {
-          setListLoading(false);
-        }
-      }
-    };
-
-    void fetchSessions();
-
-    const timer = setInterval(async () => {
-      // Pause polling during session switch to avoid bandwidth contention
-      if (sessionApi.isSessionSwitching) return;
-      try {
-        const list = await sessionApi.getSessionList(accessScope);
-        if (!isCancelled && sessionApi.isActiveOwner(owner)) {
-          // sessionApi already returns the previous array reference when the
-          // list hasn't changed, so a reference check is enough to skip no-op
-          // state updates and avoid a full re-render cascade.
-          if (list !== lastPolledSessionsRef.current) {
-            lastPolledSessionsRef.current = list;
-            setSessions(list);
-          }
-        }
-      } catch {
-        // ignore polling errors
-      }
-    }, 3000);
-
-    return () => {
-      isCancelled = true;
-      clearInterval(timer);
-    };
-  }, [props.open, selectedAgent, setSessions, accessScope]);
+  }, [page.key, setSessions]);
+  useEffect(() => {
+    if (!page.loaded) return;
+    const list = sessionApi.rememberChatPage(page.items);
+    if (!areSessionListsEqual(lastPolledSessionsRef.current, list)) {
+      lastPolledSessionsRef.current = list;
+      setSessions(list);
+    }
+  }, [page.items, page.loaded, setSessions]);
 
   /** Whether a session switch is in progress (issue #4557) */
   const [switchingSessionId, setSwitchingSessionId] = useState<string | null>(
@@ -493,32 +441,18 @@ const ChatSessionDrawer: React.FC<ChatSessionDrawerProps> = (props) => {
       // navigation). A delete that finished after an agent switch must not
       // touch the new agent's state.
       if (!sessionApi.isActiveOwner(owner)) return;
-      sessionApi.onSessionRemoved?.(backendId ?? sessionId);
-
-      // Fetch the updated session list after deletion
-      const freshList =
-        (await sessionApi.getSessionList()) as ExtendedChatSession[];
+      sessionApi.invalidateSessionAccess(backendId ?? sessionId);
+      const remaining = sessions.filter((item) => item.id !== sessionId);
+      setSessions(remaining);
+      syncSessionsGlobal(remaining as unknown as ExtendedSession[]);
+      await refreshSessions();
       if (!sessionApi.isActiveOwner(owner)) return;
-      setSessions(freshList);
-      syncSessionsGlobal(freshList as unknown as ExtendedSession[]);
-
-      // Post-deletion check: if the URL's chatId no longer exists in the
-      // refreshed list, the deleted session was the one being viewed.
-      // This approach avoids all ID-format mismatch issues (timestamp vs UUID,
-      // realId vs id, multiple backend UUIDs for the same session).
       const urlChatId = getSessionIdFromPath(location.pathname);
-      if (urlChatId) {
-        const stillExists = freshList.some(
-          (s) =>
-            s.id === urlChatId ||
-            (s as ExtendedChatSession).realId === urlChatId,
-        );
-        if (!stillExists) {
-          window.dispatchEvent(new CustomEvent("qwenpaw:sidebar-new-chat"));
-        }
+      if (urlChatId === sessionId || urlChatId === backendId) {
+        window.dispatchEvent(new CustomEvent("qwenpaw:sidebar-new-chat"));
       }
     },
-    [sessions, setSessions, location.pathname],
+    [sessions, setSessions, location.pathname, refreshSessions],
   );
 
   /** Enter rename mode for a session */
@@ -930,6 +864,16 @@ const ChatSessionDrawer: React.FC<ChatSessionDrawerProps> = (props) => {
         )}
         <div className={styles.bottomGradient} />
       </div>
+      {(page.hasMore || page.error) && (
+        <Button
+          loading={listLoading}
+          onClick={page.error ? page.retry : page.loadMore}
+        >
+          {page.error
+            ? t("common.retry", "重试")
+            : t("common.loadMore", "加载更多")}
+        </Button>
+      )}
       <ConversationShareDialog
         open={sharingChatId !== null}
         chatId={sharingChatId}

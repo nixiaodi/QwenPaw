@@ -1,15 +1,17 @@
 /**
  * usePluginLoader.ts — plugin loading utility
  *
- * Fetches the plugin list, downloads each frontend bundle, and executes it
- * via a same-origin Blob URL so plugins can self-register into the
- * `pluginSystem` singleton (hostExternals.ts).
+ * Fetches authorized plugins and executes worker-v1 bundles in dedicated
+ * workers. Only validated data registrations cross into the host UI.
  *
  * Exports `loadAllPlugins()` — the single function PluginContext calls.
  */
 
 import { getApiUrl, getApiToken } from "../api/config";
-import { pluginSystem } from "./hostExternals";
+import { createElement } from "react";
+import { pluginSystem } from "./pluginSystem";
+import { PluginWorkerClient } from "./isolated/workerClient";
+import { PluginView } from "./isolated/PluginView";
 import { chatExtensions } from "./registry/chatExtensions";
 import { menuRegistry, routeRegistry, slotRegistry } from "./registry/store";
 
@@ -21,19 +23,57 @@ interface PluginInfo {
   id: string;
   name: string;
   frontend_entry?: string;
+  frontend_runtime?: string;
+  enabled?: boolean;
 }
 
-const loadedPluginIds = new Set<string>();
+const workers = new Map<string, PluginWorkerClient>();
+let generation = 0;
+const PLUGIN_FETCH_TIMEOUT_MS = 8000;
+
+async function fetchPluginResource<T>(
+  url: string,
+  read: (response: Response) => Promise<T>,
+  signal?: AbortSignal,
+): Promise<T> {
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  if (signal?.aborted) abort();
+  signal?.addEventListener("abort", abort, { once: true });
+  const timer = setTimeout(abort, PLUGIN_FETCH_TIMEOUT_MS);
+  try {
+    const token = getApiToken();
+    const response = await fetch(url, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      signal: controller.signal,
+    });
+    if (!response.ok)
+      throw new Error(`Plugin resource HTTP ${response.status}`);
+    const result = await read(response);
+    if (controller.signal.aborted)
+      throw new DOMException("Aborted", "AbortError");
+    return result;
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", abort);
+  }
+}
 
 export function resetLoadedPlugins(): void {
-  for (const pluginId of loadedPluginIds) {
-    menuRegistry.disposeSource(pluginId);
-    routeRegistry.disposeSource(pluginId);
-    slotRegistry.disposeSource(pluginId);
-    chatExtensions.disposeAll(pluginId);
-    pluginSystem.remove(pluginId);
+  generation++;
+  for (const [source, worker] of workers) {
+    worker.stop();
+    disposeSource(source);
   }
-  loadedPluginIds.clear();
+  workers.clear();
+}
+
+function disposeSource(source: string) {
+  menuRegistry.disposeSource(source);
+  routeRegistry.disposeSource(source);
+  slotRegistry.disposeSource(source);
+  chatExtensions.disposeAll(source);
+  pluginSystem.remove(source);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -45,31 +85,69 @@ export function resetLoadedPlugins(): void {
  * to a full URL using the same base that all other API calls use.
  */
 function resolveUrl(pluginId: string, apiPath: string): string {
-  return getApiUrl(`frontend_plugin/${pluginId}/files/${apiPath}`);
+  return getApiUrl(
+    `frontend_plugin/${encodeURIComponent(pluginId)}/files/${apiPath}`,
+  );
 }
 
 /**
- * Fetch a plugin's JS source, wrap it in a same-origin Blob URL, and
- * execute it via dynamic import.  Blob URL is revoked immediately after.
+ * Download code as text only. All execution happens in a terminable worker.
  */
-async function executePluginScript(entryUrl: string): Promise<void> {
-  const token = getApiToken();
-  const headers: Record<string, string> = {};
-  if (token) headers["Authorization"] = `Bearer ${token}`;
-
-  const response = await fetch(entryUrl, { headers });
-  if (!response.ok) {
-    throw new Error(`HTTP ${response.status} for ${entryUrl}`);
-  }
-
-  const jsText = await response.text();
-  const blobUrl = URL.createObjectURL(
-    new Blob([jsText], { type: "application/javascript" }),
+async function executePluginScript(
+  plugin: PluginInfo,
+  epoch: number,
+  signal?: AbortSignal,
+  onFailure?: (message: string) => void,
+): Promise<void> {
+  if (plugin.frontend_runtime !== "worker-v1")
+    throw new Error("旧前端插件需要升级到 worker-v1，已停止自动执行");
+  if (!/^[\w.-]{1,100}$/.test(plugin.id)) throw new Error("invalid_plugin_id");
+  const jsText = await fetchPluginResource(
+    resolveUrl(plugin.id, plugin.frontend_entry!),
+    (response) => response.text(),
+    signal,
   );
+  if (signal?.aborted || generation !== epoch)
+    throw new DOMException("Aborted", "AbortError");
+  if (jsText.length > 2_000_000) throw new Error("plugin_bundle_too_large");
+  const source = `worker:${epoch}:${plugin.id}`;
+  const client = new PluginWorkerClient(plugin.id, jsText, signal);
+  workers.set(source, client);
+  let committed = false;
+  client.onStopped = () => {
+    disposeSource(source);
+    if (workers.get(source) === client) workers.delete(source);
+    if (committed && !signal?.aborted && generation === epoch)
+      onFailure?.(`${plugin.name || plugin.id}：插件已停止响应，已隔离停止`);
+  };
   try {
-    await import(/* @vite-ignore */ blobUrl);
-  } finally {
-    URL.revokeObjectURL(blobUrl);
+    const registrations = await client.ready;
+    if (signal?.aborted || generation !== epoch)
+      throw new DOMException("Aborted", "AbortError");
+    for (const item of registrations) {
+      const component = (props: Record<string, unknown>) =>
+        createElement(PluginView, { client, target: item.id, input: props });
+      if (item.kind === "route") {
+        const id = `${source}:${item.id}`;
+        routeRegistry.add(source, { id, path: item.path!, component });
+        menuRegistry.add(source, {
+          id,
+          location: "primary.settings",
+          label: item.label!,
+          route: id,
+        });
+        pluginSystem.addRoutes(source, [
+          { path: item.path!, component, label: item.label! },
+        ]);
+      } else {
+        pluginSystem.addToolRenderers(source, { [item.tool!]: component });
+      }
+    }
+    committed = true;
+  } catch (error) {
+    client.stop();
+    disposeSource(source);
+    throw error;
   }
 }
 
@@ -84,41 +162,57 @@ async function executePluginScript(entryUrl: string): Promise<void> {
  *
  * Returns a summary `{ loaded, failed }` for the caller to surface as an error.
  */
-export async function loadAllPlugins(): Promise<{
+export async function loadAllPlugins(
+  signal?: AbortSignal,
+  onFailure?: (message: string) => void,
+): Promise<{
   loaded: number;
   failed: string[];
 }> {
   const failed: string[] = [];
+  const epoch = generation;
 
   let plugins: PluginInfo[];
   try {
-    const token = getApiToken();
-    const headers: Record<string, string> = {};
-    if (token) headers["Authorization"] = `Bearer ${token}`;
-    const res = await fetch(getApiUrl("/frontend_plugin"), { headers });
-    if (!res.ok) {
-      console.warn(`[PluginLoader] /api/plugins returned ${res.status}`);
-      return { loaded: 0, failed: [] };
-    }
-    plugins = await res.json();
+    plugins = await fetchPluginResource<PluginInfo[]>(
+      getApiUrl("/frontend_plugin"),
+      (response) => response.json(),
+      signal,
+    );
+    if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+    if (!Array.isArray(plugins)) throw new Error("Invalid plugin list");
   } catch (err) {
     console.warn("[PluginLoader] failed to fetch plugin list:", err);
-    return { loaded: 0, failed: [] };
+    return { loaded: 0, failed: [String(err)] };
   }
 
-  const frontendPlugins = plugins.filter((p) => p.frontend_entry);
+  const frontendPlugins = [
+    ...new Map(
+      plugins
+        .filter((p) => p.frontend_entry && p.enabled !== false)
+        .map((p) => [p.id, p]),
+    ).values(),
+  ];
+  if (frontendPlugins.length === 0) return { loaded: 0, failed: [] };
 
   const results = await Promise.allSettled(
     frontendPlugins.map(async (p) => {
-      await executePluginScript(resolveUrl(p.id, p.frontend_entry!));
-      loadedPluginIds.add(p.id);
+      await executePluginScript(p, epoch, signal, onFailure);
       console.info(`[PluginLoader] ✓ ${p.id}`);
     }),
   );
 
   results.forEach((r, i) => {
     if (r.status === "rejected") {
-      const msg = `${frontendPlugins[i].id}: ${r.reason}`;
+      const reason = String(r.reason);
+      const explanation = reason.includes("timed_out")
+        ? "插件启动超时，已隔离停止"
+        : reason.includes("plugin_execution_failed")
+        ? "插件执行失败，已隔离停止"
+        : reason;
+      const msg = `${
+        frontendPlugins[i].name || frontendPlugins[i].id
+      }: ${explanation}`;
       console.error(`[PluginLoader] ✗ ${msg}`);
       failed.push(msg);
     }

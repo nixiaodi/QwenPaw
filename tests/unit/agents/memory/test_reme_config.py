@@ -61,6 +61,10 @@ def test_root_memory_sync_is_wired_without_watching_other_root_markdown():
 
 def test_root_memory_watch_runs_as_an_independent_background_job():
     cfg = _config_for_embedding(EmbeddingModelConfig())
+    assert (
+        cfg["jobs"]["index_update_loop"]["steps"][-1]["backend"]
+        == "qwenpaw_watch_changes_step"
+    )
 
     assert cfg["jobs"]["root_memory_update_loop"] == {
         "backend": "background",

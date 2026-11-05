@@ -1,3 +1,4 @@
+import { asChatPage } from "../../../test/chatPage";
 /**
  * Regression test for issue #6131 follow-up:
  * "Messages sent from an external channel (DingTalk) don't appear in the
@@ -64,14 +65,14 @@ afterEach(() => {
 describe("SessionApi converted-cache staleness on updated_at change (#6131)", () => {
   it("preserves shared read-only access metadata on the loaded session", async () => {
     const id = "33333333-3333-4333-8333-333333333334";
-    vi.spyOn(api, "listChats").mockResolvedValue([
+    vi.spyOn(api, "listChatPage").mockResolvedValue(asChatPage([
       {
         ...makeChatSpec(id, T0),
         access_role: "viewer",
         read_only: true,
         shared_by: "owner-user",
       },
-    ]);
+    ]));
     vi.spyOn(api, "getChat").mockResolvedValue({
       ...makeHistory([{ role: "assistant", text: "shared output" }]),
       access_role: "viewer",
@@ -93,8 +94,8 @@ describe("SessionApi converted-cache staleness on updated_at change (#6131)", ()
   it("re-fetches messages when the backend updated_at advances", async () => {
     const id = "11111111-1111-4111-8111-111111111111";
     const listSpy = vi
-      .spyOn(api, "listChats")
-      .mockResolvedValue([makeChatSpec(id, T0)]);
+      .spyOn(api, "listChatPage")
+      .mockResolvedValue(asChatPage([makeChatSpec(id, T0)]));
     const getChatSpy = vi
       .spyOn(api, "getChat")
       .mockResolvedValue(makeHistory([{ role: "assistant", text: "first" }]));
@@ -107,7 +108,7 @@ describe("SessionApi converted-cache staleness on updated_at change (#6131)", ()
 
     // A new message arrives via DingTalk: backend updated_at advances and the
     // history now has an extra user turn + reply (distinct cards).
-    listSpy.mockResolvedValue([makeChatSpec(id, T1)]);
+    listSpy.mockResolvedValue(asChatPage([makeChatSpec(id, T1)]));
     getChatSpy.mockResolvedValue(
       makeHistory([
         { role: "assistant", text: "first" },
@@ -127,7 +128,7 @@ describe("SessionApi converted-cache staleness on updated_at change (#6131)", ()
 
   it("serves the cache (no re-fetch) when updated_at is unchanged", async () => {
     const id = "22222222-2222-4222-8222-222222222222";
-    vi.spyOn(api, "listChats").mockResolvedValue([makeChatSpec(id, T0)]);
+    vi.spyOn(api, "listChatPage").mockResolvedValue(asChatPage([makeChatSpec(id, T0)]));
     const getChatSpy = vi
       .spyOn(api, "getChat")
       .mockResolvedValue(makeHistory([{ role: "assistant", text: "only" }]));
@@ -145,7 +146,7 @@ describe("SessionApi converted-cache staleness on updated_at change (#6131)", ()
   });
   it("invalidates preload results with their paging cursor before reopening a conversation", async () => {
     const id = "44444444-4444-4444-8444-444444444444";
-    vi.spyOn(api, "listChats").mockResolvedValue([makeChatSpec(id, T0)]);
+    vi.spyOn(api, "listChatPage").mockResolvedValue(asChatPage([makeChatSpec(id, T0)]));
     const getChat = vi.spyOn(api, "getChat").mockResolvedValue({
       ...makeHistory([{ role: "user", text: "latest" }]),
       has_more: true, next_before: 21,

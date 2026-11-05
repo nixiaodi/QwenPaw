@@ -1,4 +1,4 @@
-import { useEffect, useState, useDeferredValue } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Card, Form, Modal, Table, Button, Tabs } from "@agentscope-ai/design";
 import { Descriptions, Segmented } from "antd";
@@ -24,6 +24,26 @@ import AdminConversations from "./AdminConversations";
 function SessionsPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  const [filterUserId, setFilterUserId] = useState("");
+  const [filterChannel, setFilterChannel] = useState("");
+  const [filterTitle, setFilterTitle] = useState("");
+  const [serverFilters, setServerFilters] = useState({
+    search: "",
+    owner_query: "",
+    channel: "",
+  });
+  useEffect(() => {
+    const timer = setTimeout(
+      () =>
+        setServerFilters({
+          search: filterTitle,
+          owner_query: filterUserId,
+          channel: filterChannel,
+        }),
+      300,
+    );
+    return () => clearTimeout(timer);
+  }, [filterTitle, filterUserId, filterChannel]);
   const {
     sessions,
     loading,
@@ -36,12 +56,14 @@ function SessionsPage() {
     batchUnarchiveSessions,
     activeTab,
     setActiveTab,
-    activeCount,
-    archivedCount,
+    hasMore,
+    loadMore,
+    retry,
+    error: listError,
     accessScope,
     setAccessScope,
-  } = useSessions();
-  const [filteredSessions, setFilteredSessions] = useState<Session[]>([]);
+  } = useSessions(serverFilters);
+  const filteredSessions = sessions;
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [editingSession, setEditingSession] = useState<Session | null>(null);
   const [saving, setSaving] = useState(false);
@@ -51,9 +73,6 @@ function SessionsPage() {
   const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
 
   // Filter states
-  const [filterUserId, setFilterUserId] = useState<string>("");
-  const [filterChannel, setFilterChannel] = useState<string>("");
-  const [filterTitle, setFilterTitle] = useState<string>("");
   const [availableChannels, setAvailableChannels] = useState<string[]>([]);
   const [isMobile, setIsMobile] = useState(false);
 
@@ -64,8 +83,6 @@ function SessionsPage() {
     mq.addEventListener("change", handler);
     return () => mq.removeEventListener("change", handler);
   }, []);
-
-  const deferredTitle = useDeferredValue(filterTitle);
 
   const { message } = useAppMessage();
 
@@ -81,37 +98,10 @@ function SessionsPage() {
     fetchChannelTypes();
   }, []);
 
-  // Filter effect
-  useEffect(() => {
-    let filtered: Session[] = sessions;
-
-    if (filterUserId) {
-      filtered = filtered.filter(
-        (session: Session) =>
-          session.user_id?.toLowerCase().includes(filterUserId.toLowerCase()),
-      );
-    }
-
-    if (filterChannel) {
-      filtered = filtered.filter(
-        (session: Session) => session.channel === filterChannel,
-      );
-    }
-
-    if (deferredTitle) {
-      filtered = filtered.filter((session: Session) => {
-        const name = session.name || "";
-        return name.toLowerCase().includes(deferredTitle.toLowerCase());
-      });
-    }
-
-    setFilteredSessions(filtered);
-  }, [sessions, filterUserId, filterChannel, deferredTitle]);
-
   // Clear selection when switching tabs
   useEffect(() => {
     setSelectedRowKeys([]);
-  }, [activeTab]);
+  }, [activeTab, accessScope, serverFilters]);
 
   const handleEdit = (session: Session) => {
     setEditingSession(session);
@@ -313,14 +303,11 @@ function SessionsPage() {
         items={[
           {
             key: "active",
-            label: `${t("sessions.activeTab", "Active")} (${activeCount})`,
+            label: t("sessions.activeTab", "Active"),
           },
           {
             key: "archived",
-            label: `${t(
-              "sessions.archivedTab",
-              "Archived",
-            )} (${archivedCount})`,
+            label: t("sessions.archivedTab", "Archived"),
           },
         ]}
         style={{ padding: "0 16px" }}
@@ -451,14 +438,18 @@ function SessionsPage() {
               selectedRowKeys.includes(record.id) ? styles.selectedRow : ""
             }
             scroll={{ x: 1500 }}
-            pagination={{
-              pageSize: 10,
-              showSizeChanger: false,
-            }}
+            pagination={false}
           />
         </Card>
       )}
 
+      {(hasMore || listError) && (
+        <Button loading={loading} onClick={listError ? retry : loadMore}>
+          {listError
+            ? t("common.retry", "重试")
+            : t("common.loadMore", "加载更多")}
+        </Button>
+      )}
       <SessionDrawer
         open={drawerOpen}
         editingSession={editingSession}

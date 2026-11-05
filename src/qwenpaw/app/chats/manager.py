@@ -31,7 +31,7 @@ MAX_BATCH_SIZE = 500
 @dataclass(frozen=True, slots=True)
 class AccessibleChat:
     chat: ChatSpec
-    access: ConversationAccessRecord
+    access: ConversationAccessRecord | None
 
 
 class ChatManager:
@@ -115,6 +115,7 @@ class ChatManager:
         scope: str = "all",
         channel: str | None = None,
         archived: bool | None = None,
+        agent_id: UUID | None = None,
     ) -> list[AccessibleChat]:
         """Project PostgreSQL access authority onto legacy ChatSpecs."""
         repository = self._conversation_repository
@@ -123,6 +124,7 @@ class ChatManager:
         access_rows = await repository.with_user(user_id).list_conversations_for_user(
             user_id=user_id,
             scope=scope,
+            **({"agent_id": agent_id} if agent_id is not None else {}),
         )
         specs = await self._repo.filter_chats(channel=channel, archived=archived)
         by_id = {spec.id: spec for spec in specs}
@@ -131,6 +133,68 @@ class ChatManager:
             for item in access_rows
             if str(item.conversation.id) in by_id
         ]
+
+    async def list_chat_page(
+        self, *, user_id: UUID | None, agent_id: UUID | None,
+        page_size: int = 20, cursor: str | None = None, scope: str = "all",
+        search: str = "", channel: str | None = None, archived: bool | None = False,
+        owner_query: str = "", legacy_user_id: str | None = None,
+        session_id: str | None = None,
+    ):
+        """按运行索引选候选项，分批实时授权，只构建本页记录。"""
+        from .list_paging import (ChatPageResult, chat_sort_key, decode_cursor,
+                                  encode_cursor, query_key)
+
+        if not 1 <= page_size <= 100 or scope not in {"all", "owned", "shared"}:
+            raise ValueError("invalid_chat_page")
+        search, owner_query = search.strip().casefold(), owner_query.strip().casefold()
+        binding = query_key(user_id, agent_id, scope, search, channel, archived,
+                            owner_query, legacy_user_id, session_id)
+        after = decode_cursor(cursor, binding)
+        if user_id is None and scope == "shared":
+            return ChatPageResult([], False, None)
+        repository = self._conversation_repository
+        if user_id is not None and repository is None:
+            raise RuntimeError("conversation_repository_unavailable")
+        bound = repository.with_user(user_id) if user_id is not None else None
+        selected = []
+        while len(selected) <= page_size:
+            candidates = await self._repo.list_chat_candidates(
+                after=after, limit=200, search=search, channel=channel,
+                archived=archived, owner_query=owner_query, legacy_user_id=legacy_user_id,
+                session_id=session_id,
+            )
+            if not candidates:
+                break
+            if bound is not None:
+                # Historical malformed runtime identifiers must not break a valid page.
+                ids = []
+                for candidate in candidates:
+                    try:
+                        ids.append(UUID(candidate.id))
+                    except ValueError:
+                        continue
+                rows = await bound.list_conversations_for_user(
+                    user_id=user_id, agent_id=agent_id, scope=scope, conversation_ids=ids,
+                )
+                access_by_id = {str(row.conversation.id): row for row in rows}
+            else:
+                access_by_id = {}
+            for chat in candidates:
+                access = access_by_id.get(chat.id)
+                if bound is None or access is not None:
+                    selected.append(AccessibleChat(chat, access))
+                    if len(selected) > page_size:
+                        break
+            after = chat_sort_key(candidates[-1])
+            if len(candidates) < 200:
+                break
+        has_more = len(selected) > page_size
+        selected = selected[:page_size]
+        return ChatPageResult(
+            selected, has_more,
+            encode_cursor(chat_sort_key(selected[-1].chat), binding) if has_more else None,
+        )
 
     def persisting_stream_source(self, chat: ChatSpec, stream_fn):
         """返回保持原 wire 的持久化事件源；Legacy 时返回原函数。"""

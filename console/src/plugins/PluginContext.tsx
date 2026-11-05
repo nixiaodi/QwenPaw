@@ -9,9 +9,9 @@
  */
 
 import React, { createContext, useContext, useEffect, useState } from "react";
-import { pluginSystem } from "./hostExternals";
+import { pluginSystem } from "./pluginSystem";
 import { loadAllPlugins, resetLoadedPlugins } from "./usePluginLoader";
-import type { PluginRouteDeclaration } from "./hostExternals";
+import type { PluginRouteDeclaration } from "./pluginSystem";
 import {
   routeRegistry,
   subscribe as registrySubscribe,
@@ -74,7 +74,16 @@ export function PluginProvider({ children }: { children: React.ReactNode }) {
   const [pluginRoutes, setPluginRoutes] = useState<PluginRouteDeclaration[]>(
     derivePluginRoutes(),
   );
-  const [loading, setLoading] = useState(true);
+  const loadScope = JSON.stringify([authMode, authPhase, authenticatedUserId]);
+  const mayLoad =
+    authPhase !== "loading" &&
+    (authMode === "legacy" ||
+      authPhase === "disabled" ||
+      (authPhase === "authenticated" && Boolean(authenticatedUserId)));
+  const [completedScope, setCompletedScope] = useState<string | null>(null);
+  // Gate the first render for a new identity, before effects run. Otherwise
+  // business pages briefly mount, start requests, and immediately unmount.
+  const loading = mayLoad && completedScope !== loadScope;
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -96,21 +105,33 @@ export function PluginProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     resetLoadedPlugins();
-    const mayLoad =
-      authMode === "legacy" ||
-      authPhase === "disabled" ||
-      (authPhase === "authenticated" && Boolean(authenticatedUserId));
+    setCompletedScope(null);
     if (!mayLoad) {
-      setLoading(false);
       return;
     }
-    setLoading(true);
     setError(null);
-    loadAllPlugins().then(({ failed }) => {
-      if (failed.length > 0) setError(failed.join("; "));
-      setLoading(false);
-    });
-  }, [authMode, authPhase, authenticatedUserId]);
+    const controller = new AbortController();
+    loadAllPlugins(controller.signal, (failure) => {
+      if (!controller.signal.aborted)
+        setError((previous) =>
+          previous ? `${previous}; ${failure}` : failure,
+        );
+    })
+      .then(({ failed }) => {
+        if (controller.signal.aborted) return;
+        if (failed.length > 0)
+          setError((previous) =>
+            [previous, ...failed].filter(Boolean).join("; "),
+          );
+        setCompletedScope(loadScope);
+      })
+      .catch((error: unknown) => {
+        if (controller.signal.aborted) return;
+        setError(String(error));
+        setCompletedScope(loadScope);
+      });
+    return () => controller.abort();
+  }, [mayLoad, loadScope]);
 
   return (
     <PluginContext.Provider

@@ -785,6 +785,7 @@ describe("SessionApi.getSession — large payload integration (#5479)", () => {
     // the error and blank the page. The fix returns an empty session so the
     // user sees the chat shell instead of a crash.
     const apiImport = await import("../../../api");
+    vi.spyOn(apiImport.api, "getChatSpec").mockRejectedValue(new Error("Chat not found"));
     vi.spyOn(apiImport.api, "getChat").mockRejectedValue(
       new Error("Chat not found"),
     );

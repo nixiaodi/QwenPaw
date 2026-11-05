@@ -1,3 +1,4 @@
+import { asChatPage } from "../../../test/chatPage";
 /**
  * Regression tests for the stale-channel identity leak:
  * "After deleting a channel and creating a new agent, the first chat of the
@@ -60,7 +61,7 @@ function makeHistory(): ChatHistory {
 /** Loads the given chats into sessionApi and opens the first one so the
  *  window identity globals are populated from it. */
 async function openChat(spec: ChatSpec): Promise<void> {
-  vi.spyOn(api, "listChats").mockResolvedValue([spec]);
+  vi.spyOn(api, "listChatPage").mockResolvedValue(asChatPage([spec]));
   vi.spyOn(api, "getChat").mockResolvedValue(makeHistory());
   await sessionApi.getSessionList();
   await sessionApi.getSession(spec.id);
@@ -69,11 +70,13 @@ async function openChat(spec: ChatSpec): Promise<void> {
 /** Simulates the session-list reload that happens after an agent switch:
  *  the new agent owns none of the previous agent's chats. */
 async function reloadAsEmptyAgent(): Promise<void> {
-  vi.spyOn(api, "listChats").mockResolvedValue([]);
+  sessionApi.setActiveAgent(`other-${Math.random()}`);
+  vi.spyOn(api, "listChatPage").mockResolvedValue(asChatPage([]));
   await sessionApi.getSessionList();
 }
 
 beforeEach(() => {
+  sessionApi.resetForTests();
   sessionApi.lastActiveChatId = null;
   window.currentSessionId = "";
   window.currentUserId = "";
@@ -154,7 +157,7 @@ describe("getSessionIdentity stale-channel fallback", () => {
       "dingtalk",
       "user-second",
     );
-    vi.spyOn(api, "listChats").mockResolvedValue([first, second]);
+    vi.spyOn(api, "listChatPage").mockResolvedValue(asChatPage([first, second]));
     await sessionApi.getSessionList();
     sessionApi.lastActiveChatId = second.id;
 

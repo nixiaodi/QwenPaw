@@ -25,6 +25,15 @@ class BaseChatRepository(ABC):
 
     # ---- Convenience operations ----
 
+    async def list_chat_candidates(self, **filters) -> list[ChatSpec]:
+        from ..list_paging import chat_sort_key, select_candidates
+        from ....utils.io_utils import run_sync_io
+
+        chats = (await self.load()).chats
+        return await run_sync_io(
+            lambda: select_candidates(sorted(chats, key=chat_sort_key, reverse=True), **filters)
+        )
+
     async def list_chats(self) -> list[ChatSpec]:
         """List all chat specifications."""
         cf = await self.load()

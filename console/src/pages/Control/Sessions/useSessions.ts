@@ -1,64 +1,36 @@
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState } from "react";
 import { useAppMessage } from "../../../hooks/useAppMessage";
 import api from "../../../api";
 import { chatApi } from "../../../api/modules/chat";
-import type { ChatUpdateRequest } from "../../../api/types";
+import type { ChatUpdateRequest, ChatListQuery } from "../../../api/types";
 import type { Session } from "./components/constants";
-import { useAgentStore } from "../../../stores/agentStore";
+import { useChatListPages } from "../../../hooks/useChatListPages";
 import { useTranslation } from "react-i18next";
 
-export function useSessions() {
+export function useSessions(
+  filters: Pick<ChatListQuery, "search" | "owner_query" | "channel"> = {},
+) {
   const { t } = useTranslation();
-  const [allSessions, setAllSessions] = useState<Session[]>([]);
-  const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<"active" | "archived">("active");
-  const [accessScope, setAccessScope] = useState<
-    "all" | "owned" | "shared"
-  >("all");
-  const { selectedAgent } = useAgentStore();
+  const [accessScope, setAccessScope] = useState<"all" | "owned" | "shared">(
+    "all",
+  );
   const { message } = useAppMessage();
-
-  const fetchSessions = useCallback(async () => {
-    setLoading(true);
-    try {
-      const data = await chatApi.listChats({ scope: accessScope });
-      if (data) {
-        setAllSessions(data as Session[]);
-      }
-    } catch (error) {
-      console.error("Failed to load sessions:", error);
-    } finally {
-      setLoading(false);
-    }
-  }, [accessScope]);
-
-  useEffect(() => {
-    fetchSessions();
-  }, [fetchSessions, selectedAgent]);
-
-  const activeSessions = useMemo(
-    () => allSessions.filter((s) => !s.archived),
-    [allSessions],
+  const page = useChatListPages(
+    { ...filters, scope: accessScope, archived: activeTab === "archived" },
+    true,
+    false,
   );
-
-  const archivedSessions = useMemo(
-    () => allSessions.filter((s) => s.archived),
-    [allSessions],
-  );
-
-  const sessions = activeTab === "active" ? activeSessions : archivedSessions;
-  const activeCount = activeSessions.length;
-  const archivedCount = archivedSessions.length;
+  const { refresh: fetchSessions, loading } = page;
+  const sessions = page.items as Session[];
 
   const updateSession = async (
     sessionId: string,
     values: ChatUpdateRequest,
   ) => {
     try {
-      const result = await api.updateSession(sessionId, values);
-      setAllSessions((prev) =>
-        prev.map((s) => (s.id === sessionId ? result : s)),
-      );
+      await api.updateSession(sessionId, values);
+      await fetchSessions();
       message.success(t("sessions.saveSuccess"));
       return true;
     } catch (error) {
@@ -71,7 +43,7 @@ export function useSessions() {
   const deleteSession = async (sessionId: string) => {
     try {
       await api.deleteSession(sessionId);
-      setAllSessions((prev) => prev.filter((s) => s.id !== sessionId));
+      await fetchSessions();
       message.success(t("sessions.deleteSuccess"));
       return true;
     } catch (error) {
@@ -84,7 +56,7 @@ export function useSessions() {
   const batchDeleteSessions = async (sessionIds: string[]) => {
     try {
       await api.batchDeleteSessions(sessionIds);
-      setAllSessions((prev) => prev.filter((s) => !sessionIds.includes(s.id)));
+      await fetchSessions();
       message.success(
         t("sessions.batchDeleteSuccess", { count: sessionIds.length }),
       );
@@ -98,10 +70,8 @@ export function useSessions() {
 
   const archiveSession = async (sessionId: string) => {
     try {
-      const updated = await chatApi.archiveChat(sessionId);
-      setAllSessions((prev) =>
-        prev.map((s) => (s.id === sessionId ? (updated as Session) : s)),
-      );
+      await chatApi.archiveChat(sessionId);
+      await fetchSessions();
       message.success(t("sessions.archive.successHint"));
       return true;
     } catch (error) {
@@ -113,10 +83,8 @@ export function useSessions() {
 
   const unarchiveSession = async (sessionId: string) => {
     try {
-      const updated = await chatApi.unarchiveChat(sessionId);
-      setAllSessions((prev) =>
-        prev.map((s) => (s.id === sessionId ? (updated as Session) : s)),
-      );
+      await chatApi.unarchiveChat(sessionId);
+      await fetchSessions();
       message.success(
         t("sessions.archive.unarchiveSuccess", "Chat unarchived"),
       );
@@ -182,8 +150,11 @@ export function useSessions() {
     batchUnarchiveSessions,
     activeTab,
     setActiveTab,
-    activeCount,
-    archivedCount,
+    hasMore: page.hasMore,
+    loadMore: page.loadMore,
+    retry: page.retry,
+    error: page.error,
+    refresh: page.refresh,
     accessScope,
     setAccessScope,
   };

@@ -1,5 +1,13 @@
-import React, { useCallback, useMemo, useRef, useState } from "react";
-import { Dropdown, Input } from "antd";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { App, Dropdown, Input } from "antd";
+import { getAccessSessionGeneration } from "../../api/authSession";
+import { useAgentStore } from "../../stores/agentStore";
 import type { InputRef } from "antd";
 import { useTranslation } from "react-i18next";
 import {
@@ -77,6 +85,15 @@ const SessionItem: React.FC<SessionItemProps> = ({
   onEditCancel,
 }) => {
   const { t } = useTranslation();
+  const { modal } = App.useApp();
+  const mounted = useRef(true);
+  const confirmationOpen = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
   const inputRef = useRef<InputRef>(null);
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const isComposingRef = useRef(false);
@@ -108,6 +125,41 @@ const SessionItem: React.FC<SessionItemProps> = ({
       onEditCancel?.();
     }
   }, [editValue, name, onEditSubmit, onEditCancel]);
+
+  const confirmDeletion = useCallback(() => {
+    if (!onDelete || readOnly || disabled || confirmationOpen.current) return;
+    const agent = useAgentStore.getState().selectedAgent;
+    const generation = getAccessSessionGeneration();
+    confirmationOpen.current = true;
+    modal.confirm({
+      title: t("sessions.confirmDelete"),
+      content: (
+        <>
+          {t("sessions.deleteConfirm")}
+          <p>
+            <strong>{name || "New Chat"}</strong>
+          </p>
+        </>
+      ),
+      okText: t("chat.contextMenu.delete"),
+      cancelText: t("common.cancel"),
+      okType: "danger",
+      autoFocusButton: "cancel",
+      afterClose: () => {
+        confirmationOpen.current = false;
+      },
+      onOk: () => {
+        // A dialog must not apply a stale action after account/agent changes.
+        if (
+          !mounted.current ||
+          generation !== getAccessSessionGeneration() ||
+          agent !== useAgentStore.getState().selectedAgent
+        )
+          return;
+        return onDelete(sessionId);
+      },
+    });
+  }, [onDelete, readOnly, disabled, modal, t, name, sessionId]);
 
   const dropdownItems = useMemo(
     () => [
@@ -152,7 +204,8 @@ const SessionItem: React.FC<SessionItemProps> = ({
         icon: <SparkDeleteLine size={14} />,
         label: t("chat.contextMenu.delete", "Delete"),
         danger: true,
-        onClick: () => onDelete?.(sessionId),
+        disabled: !onDelete || readOnly || disabled,
+        onClick: confirmDeletion,
       },
     ],
     [
@@ -164,6 +217,9 @@ const SessionItem: React.FC<SessionItemProps> = ({
       onArchive,
       onShare,
       onDelete,
+      readOnly,
+      disabled,
+      confirmDeletion,
       handleStartEdit,
     ],
   );

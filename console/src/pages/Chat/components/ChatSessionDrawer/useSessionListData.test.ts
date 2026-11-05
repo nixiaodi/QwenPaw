@@ -10,7 +10,7 @@ import React from "react";
 import { App } from "antd";
 import { MemoryRouter } from "react-router-dom";
 import type { ChatSpec } from "../../../../api";
-import api from "../../../../api";
+import { asChatPage } from "../../../../test/chatPage";
 import { chatApi } from "../../../../api/modules/chat";
 import sessionApi from "../../sessionApi";
 import { useAgentStore } from "../../../../stores/agentStore";
@@ -69,10 +69,71 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.useRealTimers();
   sessionApi.resetForTests();
 });
 
+it("does not poll session lists in hidden tabs and refreshes on return", async () => {
+  vi.useFakeTimers();
+  const hidden = vi.spyOn(document, "hidden", "get").mockReturnValue(true);
+  const list = vi.spyOn(chatApi, "listChatPage").mockResolvedValue(asChatPage([]));
+  const setSessions = vi.fn();
+  const view = renderHook(
+    () =>
+      useSessionListData([], setSessions, {
+        active: true,
+        currentSessionId: undefined,
+        onSessionClick: vi.fn(),
+      }),
+    { wrapper },
+  );
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(60_000);
+  });
+  expect(list).not.toHaveBeenCalled();
+  hidden.mockReturnValue(false);
+  await act(async () => {
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  expect(list).toHaveBeenCalledTimes(1);
+  view.unmount();
+});
+
+it("publishes changed access metadata even when the title and timestamp are unchanged", async () => {
+  vi.useFakeTimers();
+  vi.spyOn(document, "hidden", "get").mockReturnValue(false);
+  const original = { id: A_CHAT, name: A_CHAT, access_role: "owner", read_only: false } as ChatSpec;
+  const updated = { ...original, access_role: "viewer", read_only: true, shared_by: "owner" } as ChatSpec;
+  vi.spyOn(chatApi, "listChatPage")
+    .mockResolvedValueOnce(asChatPage([original]))
+    .mockResolvedValue(asChatPage([updated]));
+  const setSessions = vi.fn();
+  const view = renderHook(() => useSessionListData([], setSessions, {
+    active: true, currentSessionId: A_CHAT, onSessionClick: vi.fn(),
+  }), { wrapper });
+  await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+  expect(setSessions).toHaveBeenLastCalledWith([expect.objectContaining({ accessRole: "owner", readOnly: false })]);
+  await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+  expect(setSessions).toHaveBeenLastCalledWith([expect.objectContaining({ accessRole: "viewer", readOnly: true, sharedBy: "owner" })]);
+  view.unmount();
+});
+
 describe("useSessionListData cross-agent ownership", () => {
+  it("keeps a deep-linked conversation open when another first-page chat is deleted", async () => {
+    sessionApi.setActiveAgent("agent-a");
+    vi.spyOn(chatApi, "deleteChat").mockResolvedValue({ success: true, chat_id: A_CHAT });
+    vi.spyOn(chatApi, "listChatPage").mockResolvedValue(asChatPage([]));
+    const newChat = vi.fn();
+    window.addEventListener("qwenpaw:sidebar-new-chat", newChat);
+    const view = renderHook(() => useSessionListData([makeSession(A_CHAT)], vi.fn(), {
+      active: false, currentSessionId: "deep-outside-loaded-pages", onSessionClick: vi.fn(),
+    }), { wrapper });
+    await act(async () => { await view.result.current.handleDelete(A_CHAT); });
+    expect(newChat).not.toHaveBeenCalled();
+    view.unmount();
+    window.removeEventListener("qwenpaw:sidebar-new-chat", newChat);
+  });
+
   it("a delete finishing after an agent switch does not mutate the new view", async () => {
     sessionApi.setActiveAgent("agent-a");
     const onSessionRemoved = vi.fn();
@@ -82,7 +143,7 @@ describe("useSessionListData cross-agent ownership", () => {
 
     const dDelete = deferred<Awaited<ReturnType<typeof chatApi.deleteChat>>>();
     vi.spyOn(chatApi, "deleteChat").mockReturnValue(dDelete.promise);
-    const listSpy = vi.spyOn(api, "listChats").mockResolvedValue([]);
+    const listSpy = vi.spyOn(chatApi, "listChatPage").mockResolvedValue(asChatPage([]));
 
     const { hook, setSessions } = renderListData([makeSession(A_CHAT)]);
 
@@ -119,7 +180,7 @@ describe("useSessionListData cross-agent ownership", () => {
     vi.spyOn(chatApi, "deleteChat").mockResolvedValue(
       {} as Awaited<ReturnType<typeof chatApi.deleteChat>>,
     );
-    vi.spyOn(api, "listChats").mockResolvedValue([] as ChatSpec[]);
+    vi.spyOn(chatApi, "listChatPage").mockResolvedValue(asChatPage([]));
 
     const { hook, setSessions } = renderListData([makeSession(A_CHAT)]);
 
@@ -134,7 +195,7 @@ describe("useSessionListData cross-agent ownership", () => {
 
   it("refetches the list immediately when the selected agent changes", async () => {
     sessionApi.setActiveAgent("agent-a");
-    const listSpy = vi.spyOn(api, "listChats").mockResolvedValue([]);
+    const listSpy = vi.spyOn(chatApi, "listChatPage").mockResolvedValue(asChatPage([]));
     const setSessions = vi.fn();
 
     renderHook(

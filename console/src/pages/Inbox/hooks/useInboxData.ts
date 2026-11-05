@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import api from "../../../api";
@@ -14,6 +21,11 @@ import {
   isPushMessageEvent,
 } from "../../../utils/inboxEvents";
 import type { HarvestInstance, InboxSummary, PushMessage } from "../types";
+import { schedulePolling } from "../../../utils/polling";
+import {
+  getAgentAccessScopeKey,
+  subscribeChatSessionScope,
+} from "../../../stores/chatSessionScope";
 
 const PUSH_POLLING_INTERVAL_MS = 6000;
 
@@ -136,6 +148,29 @@ const mapEventToPushMessage = (
 });
 
 export const useInboxData = () => {
+  const scopeKey = useSyncExternalStore(
+    subscribeChatSessionScope,
+    getAgentAccessScopeKey,
+  );
+  const control = useMemo(
+    () => ({
+      key: scopeKey,
+      controller: new AbortController(),
+      pending: null as Promise<void> | null,
+      cancelRead: undefined as (() => void) | undefined,
+      token: Symbol(),
+      revision: 0,
+      writes: 0,
+    }),
+    [scopeKey],
+  );
+  const [dataScope, setDataScope] = useState(scopeKey);
+  const current = useCallback(
+    () =>
+      !control.controller.signal.aborted &&
+      getAgentAccessScopeKey() === control.key,
+    [control],
+  );
   const { t } = useTranslation();
   const agents = useAgentStore((state) => state.agents);
   const agentsById = useMemo(
@@ -173,84 +208,117 @@ export const useInboxData = () => {
   pushMessagesRef.current = pushMessages;
   const [harvests] = useState<HarvestInstance[]>(MOCK_HARVESTS);
 
-  const loadPushMessages = useCallback(async () => {
-    try {
-      const res = await api.getInboxEvents({
-        limit: INBOX_EVENT_QUERY_LIMIT,
-        source_types: [...PUSH_MESSAGE_SOURCES],
-      });
-      const events = [...(res?.events || [])].filter(isPushMessageEvent);
-      events.sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
-      const nextItems: PushMessage[] = events.map((event) =>
-        mapEventToPushMessage(event, resolveAgentNameRef.current, tRef.current),
+  const loadPushMessages = useCallback((): Promise<void> => {
+    if (control.pending) return control.pending;
+    if (!current() || control.writes > 0) return Promise.resolve();
+    const revision = control.revision;
+    const readController = new AbortController();
+    const signal = readController.signal;
+    const scopeSignal = control.controller.signal;
+    const abortRead = () => readController.abort();
+    scopeSignal.addEventListener("abort", abortRead, { once: true });
+    control.cancelRead = abortRead;
+    const token = Symbol();
+    control.token = token;
+    control.pending = (async () => {
+      try {
+        const res = await api.getInboxEvents(
+          {
+            limit: INBOX_EVENT_QUERY_LIMIT,
+            source_types: [...PUSH_MESSAGE_SOURCES],
+          },
+          signal,
+        );
+        if (
+          signal.aborted ||
+          !current() ||
+          revision !== control.revision ||
+          control.writes > 0
+        )
+          return;
+        const events = [...(res?.events || [])].filter(isPushMessageEvent);
+        events.sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
+        const nextItems: PushMessage[] = events.map((event) =>
+          mapEventToPushMessage(
+            event,
+            resolveAgentNameRef.current,
+            tRef.current,
+          ),
+        );
+        setPushMessages(nextItems);
+        setSummary((prev) => ({
+          ...prev,
+          pushMessages: {
+            total: res?.total ?? nextItems.length,
+            unread:
+              res?.unread_count ?? nextItems.filter((m) => !m.read).length,
+          },
+        }));
+      } finally {
+        scopeSignal.removeEventListener("abort", abortRead);
+        if (control.token === token) {
+          control.pending = null;
+          control.cancelRead = undefined;
+        }
+      }
+    })();
+    return control.pending;
+  }, [control, current]);
+
+  useEffect(() => {
+    control.controller = new AbortController();
+    setDataScope(scopeKey);
+    setPushMessages([]);
+    setSummary((prev) => ({ ...prev, pushMessages: { total: 0, unread: 0 } }));
+    const stop = schedulePolling(loadPushMessages, {
+      intervalMs: PUSH_POLLING_INTERVAL_MS,
+    });
+    return () => {
+      control.controller.abort();
+      control.revision += 1;
+      control.pending = null;
+      stop();
+    };
+  }, [control, loadPushMessages, scopeKey]);
+
+  const markMessageAsRead = useCallback(
+    (messageId: string) => {
+      if (
+        !current() ||
+        !pushMessagesRef.current.some(
+          (item) => item.id === messageId && !item.read,
+        )
+      )
+        return;
+      control.revision += 1;
+      control.writes += 1;
+      control.cancelRead?.();
+      control.pending = null;
+      void api
+        .markInboxRead({ event_ids: [messageId] })
+        .catch((error) => {
+          if (current())
+            console.error("Failed to mark inbox message read", error);
+        })
+        .finally(() => {
+          control.writes -= 1;
+          control.revision += 1;
+        });
+      setPushMessages((prev) =>
+        prev.map((message) =>
+          message.id === messageId ? { ...message, read: true } : message,
+        ),
       );
-      setPushMessages(nextItems);
       setSummary((prev) => ({
         ...prev,
         pushMessages: {
-          total: res?.total ?? nextItems.length,
-          unread: res?.unread_count ?? nextItems.filter((m) => !m.read).length,
+          ...prev.pushMessages,
+          unread: Math.max(prev.pushMessages.unread - 1, 0),
         },
       }));
-    } catch (error) {
-      console.error("Failed to fetch push inbox data", error);
-    }
-  }, []);
-
-  useEffect(() => {
-    void loadPushMessages();
-
-    let timer: number | null = null;
-
-    const startPolling = () => {
-      if (timer) return;
-      timer = window.setInterval(() => {
-        void loadPushMessages();
-      }, PUSH_POLLING_INTERVAL_MS);
-    };
-
-    const stopPolling = () => {
-      if (timer) {
-        window.clearInterval(timer);
-        timer = null;
-      }
-    };
-
-    const handleVisibilityChange = () => {
-      if (document.visibilityState === "visible") {
-        void loadPushMessages();
-        startPolling();
-      } else {
-        stopPolling();
-      }
-    };
-
-    if (document.visibilityState === "visible") {
-      startPolling();
-    }
-
-    document.addEventListener("visibilitychange", handleVisibilityChange);
-    return () => {
-      stopPolling();
-      document.removeEventListener("visibilitychange", handleVisibilityChange);
-    };
-  }, [loadPushMessages]);
-
-  const markMessageAsRead = useCallback((messageId: string) => {
-    void api.markInboxRead({ event_ids: [messageId] });
-    setPushMessages((prev) =>
-      prev.map((message) =>
-        message.id === messageId ? { ...message, read: true } : message,
-      ),
-    );
-    setSummary((prev) => ({
-      ...prev,
-      pushMessages: {
-        ...prev.pushMessages,
-        unread: Math.max(prev.pushMessages.unread - 1, 0),
-      },
-    }));
-  }, []);
+    },
+    [control, current],
+  );
 
   const markAllMessagesAsRead = useCallback(async (): Promise<number> => {
     const unreadIds = pushMessagesRef.current
@@ -259,7 +327,18 @@ export const useInboxData = () => {
     if (!unreadIds.length) {
       return 0;
     }
-    await api.markInboxRead({ all: true });
+    if (!current()) return 0;
+    control.revision += 1;
+    control.writes += 1;
+    control.cancelRead?.();
+    control.pending = null;
+    try {
+      await api.markInboxRead({ all: true });
+    } finally {
+      control.writes -= 1;
+      control.revision += 1;
+    }
+    if (!current()) return 0;
     setPushMessages((prev) =>
       prev.map((message) =>
         message.read ? message : { ...message, read: true },
@@ -273,42 +352,51 @@ export const useInboxData = () => {
       },
     }));
     return unreadIds.length;
-  }, []);
+  }, [control, current]);
 
-  const deleteMessages = useCallback(async (messageIds: string[]) => {
-    const ids = Array.from(
-      new Set(messageIds.map((id) => id.trim()).filter(Boolean)),
-    );
-    if (!ids.length) return 0;
-    const idSet = new Set(ids);
-    const result = await api.deleteInboxEvents(ids);
-    const deleted = result.deleted;
-    if (deleted <= 0) return 0;
-    if (deleted !== ids.length) {
-      await loadPushMessages();
-      return deleted;
-    }
-    let unreadDeleted = 0;
-    setPushMessages((prev) => {
-      const remaining: PushMessage[] = [];
-      for (const message of prev) {
-        if (idSet.has(message.id)) {
-          if (!message.read) unreadDeleted += 1;
-          continue;
-        }
-        remaining.push(message);
+  const deleteMessages = useCallback(
+    async (messageIds: string[]) => {
+      const ids = Array.from(
+        new Set(messageIds.map((id) => id.trim()).filter(Boolean)),
+      );
+      if (!ids.length) return 0;
+      const idSet = new Set(ids);
+      if (!current()) return 0;
+      control.revision += 1;
+      control.writes += 1;
+      control.cancelRead?.();
+      control.pending = null;
+      let result;
+      try {
+        result = await api.deleteInboxEvents(ids);
+      } finally {
+        control.writes -= 1;
+        control.revision += 1;
       }
-      return remaining;
-    });
-    setSummary((prev) => ({
-      ...prev,
-      pushMessages: {
-        total: Math.max(prev.pushMessages.total - deleted, 0),
-        unread: Math.max(prev.pushMessages.unread - unreadDeleted, 0),
-      },
-    }));
-    return deleted;
-  }, [loadPushMessages]);
+      if (!current()) return 0;
+      const deleted = result.deleted;
+      if (deleted <= 0) return 0;
+      if (deleted !== ids.length) {
+        await loadPushMessages();
+        return deleted;
+      }
+      const unreadDeleted = pushMessagesRef.current.filter(
+        (message) => idSet.has(message.id) && !message.read,
+      ).length;
+      setPushMessages((prev) =>
+        prev.filter((message) => !idSet.has(message.id)),
+      );
+      setSummary((prev) => ({
+        ...prev,
+        pushMessages: {
+          total: Math.max(prev.pushMessages.total - deleted, 0),
+          unread: Math.max(prev.pushMessages.unread - unreadDeleted, 0),
+        },
+      }));
+      return deleted;
+    },
+    [loadPushMessages, control, current],
+  );
 
   const deleteMessage = useCallback(
     (messageId: string) => {
@@ -321,15 +409,30 @@ export const useInboxData = () => {
     console.info("triggerHarvest", harvestId);
   }, []);
 
+  const refreshPushMessages = useCallback(async () => {
+    try {
+      await loadPushMessages();
+    } catch (error) {
+      if (
+        current() &&
+        !(error instanceof DOMException && error.name === "AbortError")
+      )
+        console.error("Failed to fetch push inbox data", error);
+    }
+  }, [loadPushMessages, current]);
+
   return {
-    summary,
-    pushMessages,
+    summary:
+      dataScope === scopeKey
+        ? summary
+        : { ...summary, pushMessages: { total: 0, unread: 0 } },
+    pushMessages: dataScope === scopeKey ? pushMessages : [],
     harvests,
     markMessageAsRead,
     markAllMessagesAsRead,
     deleteMessage,
     deleteMessages,
     triggerHarvest,
-    refreshPushMessages: loadPushMessages,
+    refreshPushMessages,
   };
 };

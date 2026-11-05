@@ -125,6 +125,10 @@ async def list_admin_conversations(
     agentId: str,
     actor: ActorContext = Depends(get_actor),
     service: AgentGovernanceService = Depends(get_governance_service),
+    *,
+    page_size: Annotated[int | None, Query(ge=1, le=100)] = None,
+    cursor: Annotated[str | None, Query(max_length=1024)] = None,
+    search: Annotated[str, Query(max_length=200)] = "",
 ):
     try:
         await service.require_admin_agent(
@@ -134,10 +138,30 @@ async def list_admin_conversations(
         raise _map_error(exc) from exc
     from ...access.agent_repository import agent_database_id
 
+    from datetime import datetime, timedelta, timezone
+    from ..chats.list_paging import decode_cursor, encode_cursor, query_key, timestamp_microseconds
+
+    binding = query_key("admin", actor.user_id, agentId, search.strip().casefold())
+    try:
+        decoded = decode_cursor(cursor, binding)
+        after = (datetime(1970, 1, 1, tzinfo=timezone.utc) + timedelta(microseconds=decoded[1]), UUID(decoded[2])) if decoded else None
+    except (ValueError, OverflowError, OSError) as exc:
+        raise HTTPException(400, "invalid_chat_cursor") from exc
+    options = {"limit": page_size + 1, "after": after, "search": search.strip()} if page_size else {}
     rows = await get_admin_conversation_repository(actor).list_conversations_for_admin(
-        agent_database_id(agentId)
+        agent_database_id(agentId), **options,
     )
-    return {"conversations": rows, "read_only": True}
+    has_more = page_size is not None and len(rows) > page_size
+    if page_size:
+        rows = rows[:page_size]
+    next_cursor = None
+    if has_more:
+        last = rows[-1]
+        timestamp = last["updated_at"]
+        if isinstance(timestamp, str):
+            timestamp = datetime.fromisoformat(timestamp)
+        next_cursor = encode_cursor((0, timestamp_microseconds(timestamp), str(last["id"])), binding)
+    return {"conversations": rows, "read_only": True, "has_more": has_more, "next_cursor": next_cursor}
 
 
 @router.get(

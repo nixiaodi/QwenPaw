@@ -1,6 +1,9 @@
 import { request } from "../request";
-import { getApiUrl } from "../config";
-import { buildAuthHeaders } from "../authHeaders";
+import { withAgentRequestContext } from "./agentRequestContext";
+import {
+  subscribeSessionEvents,
+  type SessionStreamOptions,
+} from "../sessionEventStream";
 
 export type RuntimeStatusKind = "running" | "failed" | "completed" | "idle";
 
@@ -19,9 +22,15 @@ export interface RuntimeStatus {
 }
 
 export const runtimeStatusApi = {
-  getCurrent: (sessionId: string) =>
+  getCurrent: (
+    sessionId: string,
+    options?: { signal?: AbortSignal; agentId?: string },
+  ) =>
     request<RuntimeStatus | null>(
       `/runtime-status/current?session_id=${encodeURIComponent(sessionId)}`,
+      ...(options
+        ? [withAgentRequestContext({ signal: options.signal }, options)]
+        : []),
     ),
 };
 
@@ -32,62 +41,20 @@ export function subscribeRuntimeStatusUpdates(
     rootSessionId: string | undefined,
   ) => void,
   onError?: (err: unknown) => void,
+  options?: SessionStreamOptions,
 ): () => void {
-  let aborted = false;
-  const controller = new AbortController();
-
-  async function connect() {
-    while (!aborted) {
-      try {
-        const response = await fetch(getApiUrl("/runtime-status/stream"), {
-          headers: buildAuthHeaders(),
-          signal: controller.signal,
-        });
-
-        if (!response.ok || !response.body) {
-          throw new Error(`SSE connect failed: ${response.status}`);
-        }
-
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = "";
-
-        while (!aborted) {
-          const { done, value } = await reader.read();
-          if (done) break;
-
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split("\n");
-          buffer = lines.pop() || "";
-
-          for (const line of lines) {
-            if (!line.startsWith("data: ")) continue;
-            try {
-              const data = JSON.parse(line.slice(6));
-              if (data.type === "runtime_status") {
-                const next =
-                  data.status === "completed" || data.status === "idle"
-                    ? null
-                    : (data as RuntimeStatus);
-                onUpdate(next, data.session_id, data.root_session_id);
-              }
-            } catch {
-              // ignore malformed payloads
-            }
-          }
-        }
-      } catch (err) {
-        if (aborted) return;
-        onError?.(err);
-        await new Promise((resolve) => setTimeout(resolve, 3000));
+  return subscribeSessionEvents<RuntimeStatus>(
+    "/runtime-status/stream",
+    (data) => {
+      if (data.type === "runtime_status") {
+        onUpdate(
+          data.status === "completed" || data.status === "idle" ? null : data,
+          data.session_id,
+          data.root_session_id,
+        );
       }
-    }
-  }
-
-  connect();
-
-  return () => {
-    aborted = true;
-    controller.abort();
-  };
+    },
+    onError,
+    options,
+  );
 }

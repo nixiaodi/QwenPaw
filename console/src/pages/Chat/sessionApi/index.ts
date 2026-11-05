@@ -20,7 +20,9 @@ import {
 import { useTurnUsageStore } from "../turnUsageStore";
 import { QWENPAW_CLIENT_MESSAGE_ID_KEY } from "../../../utils/clientMessageId";
 import { getUserScopedStoragePrefix } from "../../../stores/identityStorage";
+import { publishChatSessionIdentity } from "../../../stores/chatSessionIdentity";
 import { syncSessionsGlobal } from "../../../stores/sessionListStore";
+import { areSessionListsEqual } from "../sessionListEqual";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -1078,6 +1080,7 @@ class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
       window.currentSessionId = sessionId;
       window.currentUserId = DEFAULT_USER_ID;
       window.currentChannel = DEFAULT_CHANNEL;
+      publishChatSessionIdentity(sessionId, sessionId);
       useTurnUsageStore.getState().setSnapshot(null);
     }
     return {
@@ -1095,6 +1098,10 @@ class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
     window.currentSessionId = session.sessionId || "";
     window.currentUserId = session.userId || DEFAULT_USER_ID;
     window.currentChannel = session.channel || DEFAULT_CHANNEL;
+    publishChatSessionIdentity(
+      window.currentSessionId,
+      session.realId || session.id || "",
+    );
   }
 
   /** Resets window identity globals to their defaults. Called on agent
@@ -1105,6 +1112,7 @@ class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
     window.currentSessionId = "";
     window.currentUserId = DEFAULT_USER_ID;
     window.currentChannel = DEFAULT_CHANNEL;
+    publishChatSessionIdentity("", "");
   }
 
   private findSession(id: string): ExtendedSession | undefined {
@@ -1270,29 +1278,50 @@ class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
     // resolve to the same existing entry — the root cause of #3843.
     const matchedExistingIds = new Set<string>();
 
+    // Index once per refresh. Re-scanning the old list for every incoming chat
+    // blocks the UI quadratically as history grows. Buckets preserve the old
+    // first-unmatched semantics even if aliases temporarily overlap.
+    type Candidates = { sessions: ExtendedSession[]; cursor: number };
+    const byBackendId = new Map<string, Candidates>();
+    const unresolvedBySessionId = new Map<string, Candidates>();
+    const addCandidate = (
+      index: Map<string, Candidates>,
+      key: string,
+      session: ExtendedSession,
+    ) => {
+      const bucket = index.get(key);
+      if (bucket) bucket.sessions.push(session);
+      else index.set(key, { sessions: [session], cursor: 0 });
+    };
+    for (const session of this.sessionList as ExtendedSession[]) {
+      addCandidate(byBackendId, session.id, session);
+      if (session.realId && session.realId !== session.id) {
+        addCandidate(byBackendId, session.realId, session);
+      }
+      if (isLocalTimestamp(session.id) && !session.realId) {
+        addCandidate(unresolvedBySessionId, session.sessionId, session);
+      }
+    }
+    const takeUnmatched = (bucket: Candidates | undefined) => {
+      if (!bucket) return undefined;
+      while (bucket.cursor < bucket.sessions.length) {
+        const candidate = bucket.sessions[bucket.cursor++];
+        if (!matchedExistingIds.has(candidate.id)) return candidate;
+      }
+      return undefined;
+    };
+
     this.sessionList = newList.map((s) => {
       const sExt = s as ExtendedSession;
 
       // 1) Exact match by backend UUID: s.id matches existing.id or existing.realId
-      let existing = this.sessionList.find((e) => {
-        if (matchedExistingIds.has(e.id)) return false;
-        const eExt = e as ExtendedSession;
-        return e.id === s.id || (eExt.realId != null && eExt.realId === s.id);
-      }) as ExtendedSession | undefined;
+      let existing = takeUnmatched(byBackendId.get(s.id));
 
       // 2) A newly-created local placeholder may only be claimed by the
       // newest backend conversation for that sessionId. Backend UUID is the
       // durable identity; sessionId is not unique across conversations.
       if (!existing && newestBySessionId.get(sExt.sessionId) === s) {
-        existing = this.sessionList.find((e) => {
-          if (matchedExistingIds.has(e.id)) return false;
-          const extended = e as ExtendedSession;
-          return (
-            isLocalTimestamp(e.id) &&
-            !extended.realId &&
-            extended.sessionId === sExt.sessionId
-          );
-        }) as ExtendedSession | undefined;
+        existing = takeUnmatched(unresolvedBySessionId.get(sExt.sessionId));
       }
 
       if (!existing) return s;
@@ -1358,43 +1387,13 @@ class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
     // reference to prevent downstream useMemo / React re-renders.
     if (
       this._prevReturnedList &&
-      this.isSessionListEqual(this._prevReturnedList, this.sessionList)
+      areSessionListsEqual(this._prevReturnedList, this.sessionList)
     ) {
       return this._prevReturnedList;
     }
     const result = [...this.sessionList];
     this._prevReturnedList = result;
     return result;
-  }
-
-  /**
-   * Shallow-compare two session lists by key fields.
-   * Returns true if lists are structurally identical (no re-render needed).
-   */
-  private isSessionListEqual(
-    prev: IAgentScopeRuntimeWebUISession[],
-    next: IAgentScopeRuntimeWebUISession[],
-  ): boolean {
-    if (prev.length !== next.length) return false;
-    for (let i = 0; i < prev.length; i++) {
-      const a = prev[i] as ExtendedSession;
-      const b = next[i] as ExtendedSession;
-      if (
-        a.id !== b.id ||
-        a.name !== b.name ||
-        a.status !== b.status ||
-        a.updatedAt !== b.updatedAt ||
-        a.pinned !== b.pinned ||
-        a.generating !== b.generating ||
-        a.realId !== b.realId ||
-        a.accessRole !== b.accessRole ||
-        a.readOnly !== b.readOnly ||
-        a.sharedBy !== b.sharedBy
-      ) {
-        return false;
-      }
-    }
-    return true;
   }
 
   async getSessionList(scope: "all" | "owned" | "shared" = "all") {
@@ -1416,13 +1415,13 @@ class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
     };
     entry.promise = (async () => {
       try {
-        const chats = await api.listChats({ archived: false, scope });
+        const page = await api.listChatPage({ archived: false, scope, page_size: 20 });
         // A result from a stale epoch must not replace the current agent's
         // session list; hand back the current list without mutation.
         if (!this.isActiveOwner(owner)) {
           return this._prevReturnedList ?? [...this.sessionList];
         }
-        return this.applyChatsToSessionList(chats);
+        return this.rememberChatPage(page.items);
       } finally {
         if (this.sessionListRequest === entry) this.sessionListRequest = null;
       }
@@ -1430,6 +1429,17 @@ class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
     this.sessionListRequest = entry;
 
     return entry.promise;
+  }
+
+  /** Keep loaded identities for direct navigation without expanding the visible page. */
+  rememberChatPage(chats: ChatSpec[]): IAgentScopeRuntimeWebUISession[] {
+    const previous = this.sessionList;
+    const result = this.applyChatsToSessionList(chats);
+    const ids = new Set(this.sessionList.flatMap((item) => [item.id, (item as ExtendedSession).realId]));
+    this.sessionList = [...this.sessionList, ...previous.filter((item) =>
+      !ids.has(item.id) && !ids.has((item as ExtendedSession).realId ?? item.id),
+    )];
+    return result;
   }
 
   /**
@@ -1654,15 +1664,33 @@ class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
         this.applySessionView(fromList, owner);
         return fromList;
       }
+      // An old timestamp URL may refer to a chat beyond the first list page.
+      const page = await api.listChatPage({ session_id: sessionId, page_size: 1, archived: false });
+      if (!this.isActiveOwner(owner) || signal?.aborted)
+        throw new DOMException("Aborted", "AbortError");
+      if (page.items.length) {
+        this.preferredChatId = sessionId;
+        this.rememberChatPage(page.items);
+        const restored = this.findSession(sessionId);
+        if (restored?.realId) return this.fetchAndBuildSession(sessionId, restored.realId, restored, signal, owner);
+      }
       return this.createEmptySession(sessionId, owner);
     }
 
     // --- Regular backend UUID ---
     try {
+      let listEntry = this.findSession(sessionId);
+      if (!listEntry) {
+        const spec = await api.getChatSpec(sessionId, signal);
+        if (!this.isActiveOwner(owner) || signal?.aborted)
+          throw new DOMException("Aborted", "AbortError");
+        this.rememberChatPage([spec]);
+        listEntry = this.findSession(sessionId);
+      }
       return await this.fetchAndBuildSession(
         sessionId,
         sessionId,
-        this.findSession(sessionId),
+        listEntry,
         signal,
         owner,
       );
@@ -1725,8 +1753,13 @@ class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
     // resolveRealId to silently fail and onSessionIdResolved never fires,
     // leaving the URL at /chat instead of /chat/<uuid>.
     this.sessionListRequest = null;
-    const promise = this.getSessionList()
-      .then(() => this.resolveAndNotify(tempId, owner))
+    const promise = api.listChatPage({ session_id: tempId, page_size: 1, archived: false })
+      .then((page) => {
+        if (!this.isActiveOwner(owner)) return;
+        this.rememberChatPage(page.items);
+        this.resolveAndNotify(tempId, owner);
+      })
+      .catch(() => { /* The next list refresh or POST identity can retry resolution. */ })
       .finally(() => {
         if (this.resolvePromise === promise) this.resolvePromise = null;
       });

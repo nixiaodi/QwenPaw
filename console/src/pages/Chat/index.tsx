@@ -282,8 +282,8 @@ import {
   MAX_QUEUE_SIZE,
   getStoragePrefix,
   withSendLock,
-  holdOwnershipLock,
 } from "../../stores/messageQueueStore";
+import { useQueueOwnership } from "./hooks/useQueueOwnership";
 import {
   requiresQwenPawModel,
   supportsAgentAttachments,
@@ -1553,32 +1553,15 @@ export default function ChatPage() {
   // are queue-only (input is enqueued instead of submitted). The owner is
   // determined by an exclusive Web Lock keyed by sessionId; when the owner
   // tab closes, another tab acquires the lock and becomes the owner.
-  const [isOwner, setIsOwner] = useState(false);
-  const [ownershipResolved, setOwnershipResolved] = useState(false);
+  const queueUserId = useAuthStore((state) => state.user?.id ?? "legacy");
+  const queueOwnership = useQueueOwnership(
+    queueSessionId,
+    `${queueUserId}:${selectedAgent}`,
+    !chatReadOnly,
+  );
+  const { isOwner } = queueOwnership;
   const isOwnerRef = useRef(false);
   isOwnerRef.current = isOwner;
-  useEffect(() => {
-    setIsOwner(false);
-    setOwnershipResolved(false);
-    const ctrl = new AbortController();
-    void holdOwnershipLock(
-      queueSessionId,
-      () => {
-        setIsOwner(true);
-        setOwnershipResolved(true);
-      },
-      ctrl.signal,
-    );
-    // If the lock callback never fires (e.g. another tab holds it), resolve
-    // after a short delay so the non-owner Alert appears without flashing.
-    const fallbackTimer = setTimeout(() => {
-      setOwnershipResolved(true);
-    }, 300);
-    return () => {
-      ctrl.abort();
-      clearTimeout(fallbackTimer);
-    };
-  }, [queueSessionId]);
 
   const syncLoopModeStatus = useCallback(() => {
     const backendSessionId =
@@ -1607,10 +1590,9 @@ export default function ChatPage() {
     return () => controller.abort();
   }, [chatId, selectedAgent]);
 
-  // Whether this tab is confirmed to be a non-owner (queue-only) tab.
-  // Stays false until ownership check completes, preventing a flash of
-  // the "other tab is owner" banner on every session switch.
-  const isQueueOnlyTab = ownershipResolved && !isOwner;
+  const isQueueOnlyTab =
+    queueOwnership.status === "other-owner" ||
+    queueOwnership.status === "error";
   const hasQueueItems = messageQueue.length > 0;
 
   // Backend session id for the background-task panel (list API + store filter).
@@ -1664,86 +1646,110 @@ export default function ChatPage() {
     };
   }, [queueSessionId]);
 
-  const scheduleNextSend = useCallback(() => {
-    if (autoSendTimerRef.current) clearTimeout(autoSendTimerRef.current);
-    foregroundQueueWaitAbortRef.current?.abort();
-    autoSendTimerRef.current = setTimeout(async () => {
-      autoSendTimerRef.current = null;
-      if (chatLoadingRef.current) return;
-      if (pendingDirectSubmissionRef.current) return;
-      // Only the owner tab is allowed to actually send.
-      if (!isOwnerRef.current) return;
-      // Respect pause/error state — read fresh from store
-      const state = useMessageQueueStore.getState().getRunState(queueSessionId);
-      if (state === "paused" || state === "error") return;
-      const q = messageQueueRef.current;
-      if (q.length === 0) return;
-      const next = q[0];
+  const scheduleNextSend = useCallback(
+    function scheduleNextSend() {
+      if (autoSendTimerRef.current) clearTimeout(autoSendTimerRef.current);
+      foregroundQueueWaitAbortRef.current?.abort();
+      autoSendTimerRef.current = setTimeout(async () => {
+        autoSendTimerRef.current = null;
+        if (chatLoadingRef.current) return;
+        if (pendingDirectSubmissionRef.current) return;
+        // Only the owner tab is allowed to actually send.
+        if (!isOwnerRef.current) return;
+        // Respect pause/error state — read fresh from store
+        const state = useMessageQueueStore
+          .getState()
+          .getRunState(queueSessionId);
+        if (state === "paused" || state === "error") return;
+        const q = messageQueueRef.current;
+        if (q.length === 0) return;
+        const next = q[0];
 
-      // The SDK clears loading slightly before the backend releases its task
-      // lock. Wait for the backend authority before draining the next item.
-      const ctrl = new AbortController();
-      foregroundQueueWaitAbortRef.current = ctrl;
-      const chatIdForStatus =
-        sessionApi.getRealIdForSession(queueSessionId) || queueSessionId;
-      const idle = await waitForChatIdle(
-        chatIdForStatus,
-        ctrl.signal,
-        next.agentId,
-      );
-      if (foregroundQueueWaitAbortRef.current === ctrl) {
-        foregroundQueueWaitAbortRef.current = null;
-      }
-      if (
-        !idle ||
-        ctrl.signal.aborted ||
-        queueSessionIdRef.current !== queueSessionId ||
-        chatLoadingRef.current ||
-        !isOwnerRef.current
-      ) {
-        return;
-      }
-      // Acquire the per-session send lock so concurrent tabs don't both fire
-      // the same item. If another tab holds the lock, drop this attempt; the
-      // cross-tab broadcast will refresh our queue and the next loading→idle
-      // transition will retry.
-      void withSendLock(queueSessionId, () => {
-        // Re-check: another tab may have already removed this item via
-        // broadcast, or a session switch may have happened.
-        const fresh = useMessageQueueStore.getState().getQueue(queueSessionId);
+        // The SDK clears loading slightly before the backend releases its task
+        // lock. Wait for the backend authority before draining the next item.
+        const ctrl = new AbortController();
+        foregroundQueueWaitAbortRef.current = ctrl;
+        const chatIdForStatus =
+          sessionApi.getRealIdForSession(queueSessionId) || queueSessionId;
+        const idle = await waitForChatIdle(
+          chatIdForStatus,
+          ctrl.signal,
+          next.agentId,
+        );
+        if (foregroundQueueWaitAbortRef.current === ctrl) {
+          foregroundQueueWaitAbortRef.current = null;
+        }
         if (
-          pendingDirectSubmissionRef.current ||
-          fresh.length === 0 ||
-          fresh[0].id !== next.id
-        )
-          return;
-        useMessageQueueStore.getState().setCurrentSendingId(next.id);
-        useMessageQueueStore.getState().remove(queueSessionId, next.id);
-        const fallbackIdentity = sessionApi.getSessionIdentity(queueSessionId);
-        pendingDirectSubmissionRef.current = {
-          queueSessionId,
-          backendChatId: resolveBackendChatId(queueSessionId),
-          agentId: next.agentId || selectedAgentRef.current,
-          identity: {
-            sessionId: next.backendSessionId || fallbackIdentity.sessionId,
-            userId: next.userId || fallbackIdentity.userId,
-            channel: next.channel || fallbackIdentity.channel,
-          },
-          owner: sessionApi.getActiveOwner(),
-          usesQwenPawBackend,
-        };
-        const input = chatRef.current?.input;
-        if (!input) {
-          pendingDirectSubmissionRef.current = null;
+          !idle ||
+          ctrl.signal.aborted ||
+          queueSessionIdRef.current !== queueSessionId ||
+          chatLoadingRef.current ||
+          !isOwnerRef.current
+        ) {
           return;
         }
-        input.submit({
-          query: beginLoopModeSubmission(next.text),
-          fileList: buildFileList(next),
+        // Ownership can recover before the SDK has mounted its sender. Retain
+        // the queued item and retry; never remove an item with nowhere to send it.
+        if (!chatRef.current?.input) {
+          scheduleNextSend();
+          return;
+        }
+        // The send lock also covers background senders. Retry contention or a
+        // transient lock error without dropping the queued item.
+        void withSendLock(queueSessionId, () => {
+          // Re-check: another tab may have already removed this item via
+          // broadcast, or a session switch may have happened.
+          const fresh = useMessageQueueStore
+            .getState()
+            .getQueue(queueSessionId);
+          if (
+            ctrl.signal.aborted ||
+            queueSessionIdRef.current !== queueSessionId ||
+            !isOwnerRef.current ||
+            ["paused", "error"].includes(
+              useMessageQueueStore.getState().getRunState(queueSessionId),
+            ) ||
+            pendingDirectSubmissionRef.current ||
+            fresh.length === 0 ||
+            fresh[0].id !== next.id
+          )
+            return;
+          const input = chatRef.current?.input;
+          if (!input) return;
+          useMessageQueueStore.getState().setCurrentSendingId(next.id);
+          useMessageQueueStore.getState().remove(queueSessionId, next.id);
+          const fallbackIdentity =
+            sessionApi.getSessionIdentity(queueSessionId);
+          pendingDirectSubmissionRef.current = {
+            queueSessionId,
+            backendChatId: resolveBackendChatId(queueSessionId),
+            agentId: next.agentId || selectedAgentRef.current,
+            identity: {
+              sessionId: next.backendSessionId || fallbackIdentity.sessionId,
+              userId: next.userId || fallbackIdentity.userId,
+              channel: next.channel || fallbackIdentity.channel,
+            },
+            owner: sessionApi.getActiveOwner(),
+            usesQwenPawBackend,
+          };
+          input.submit({
+            query: beginLoopModeSubmission(next.text),
+            fileList: buildFileList(next),
+          });
+        }).then((result) => {
+          if (
+            result === null &&
+            !ctrl.signal.aborted &&
+            queueSessionIdRef.current === queueSessionId &&
+            isOwnerRef.current
+          ) {
+            scheduleNextSend();
+          }
         });
-      });
-    }, 500);
-  }, [queueSessionId, buildFileList, usesQwenPawBackend]);
+      }, 500);
+    },
+    [queueSessionId, buildFileList, usesQwenPawBackend],
+  );
 
   // Reload queue when switching sessions or on first mount
   const prevQueueSessionIdRef = useRef<string | null>(null);
@@ -4426,10 +4432,21 @@ export default function ChatPage() {
             />
             {isQueueOnlyTab && (
               <Alert
-                type="info"
+                type={queueOwnership.status === "error" ? "warning" : "info"}
                 showIcon
                 banner
-                message={t("chat.queue.otherTabOwner")}
+                message={t(
+                  queueOwnership.status === "error"
+                    ? "chat.queue.ownershipError"
+                    : "chat.queue.otherTabOwner",
+                )}
+                action={
+                  queueOwnership.status === "error" ? (
+                    <Button size="small" onClick={queueOwnership.retry}>
+                      {t("chat.queue.retryOwnership")}
+                    </Button>
+                  ) : undefined
+                }
               />
             )}
             {showSenderBeforeUI && (
@@ -4801,6 +4818,8 @@ export default function ChatPage() {
     toggleWideMode,
     hasQueueItems,
     isQueueOnlyTab,
+    queueOwnership.status,
+    queueOwnership.retry,
     handleQueueRemove,
     handleQueueEdit,
     handleQueueReorder,

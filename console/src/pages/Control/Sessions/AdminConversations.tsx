@@ -113,6 +113,18 @@ function AgentConversations({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [query, setQuery] = useState("");
+  const [search, setSearch] = useState("");
+  const [cursor, setCursor] = useState<string | null>(null);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  useEffect(() => {
+    if (query.trim() === search) return;
+    const timer = setTimeout(() => {
+      setSearch(query.trim());
+      setCursor(null);
+      setRows([]);
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [query, search]);
   const [revision, setRevision] = useState(0);
   const [active, setActive] = useState<AdminConversation | null>(null);
   useEffect(() => {
@@ -120,13 +132,27 @@ function AgentConversations({
     setLoading(true);
     setError("");
     void agentsApi
-      .listAdminConversations(agentId, controller.signal)
+      .listAdminConversations(agentId, controller.signal, { cursor, search })
       .then((result) => {
-        if (!controller.signal.aborted) setRows(result.conversations);
+        if (!controller.signal.aborted) {
+          setRows((old) =>
+            cursor
+              ? [
+                  ...new Map(
+                    [...old, ...result.conversations].map((row) => [
+                      row.id,
+                      row,
+                    ]),
+                  ).values(),
+                ]
+              : result.conversations,
+          );
+          setNextCursor(result.has_more ? result.next_cursor : null);
+        }
       })
       .catch(() => {
         if (!controller.signal.aborted) {
-          setRows([]);
+          if (!cursor) setRows([]);
           setError(t("sessions.viewFailed"));
         }
       })
@@ -134,8 +160,7 @@ function AgentConversations({
         if (!controller.signal.aborted) setLoading(false);
       });
     return () => controller.abort();
-  }, [agentId, revision, t]);
-  const search = query.trim().toLowerCase();
+  }, [agentId, revision, t, cursor, search]);
   return (
     <>
       {error && <Alert type="error" message={error} />}
@@ -149,7 +174,10 @@ function AgentConversations({
         />
         <Button
           loading={loading}
-          onClick={() => setRevision((value) => value + 1)}
+          onClick={() => {
+            setCursor(null);
+            setRevision((value) => value + 1);
+          }}
         >
           {t("common.refresh")}
         </Button>
@@ -157,13 +185,9 @@ function AgentConversations({
       <Table
         rowKey="id"
         loading={loading}
-        pagination={{ pageSize: 20 }}
+        pagination={false}
         scroll={{ x: true }}
-        dataSource={rows.filter((row) =>
-          `${row.title} ${row.owner_name} ${row.owner_user_id} ${row.id}`
-            .toLowerCase()
-            .includes(search),
-        )}
+        dataSource={rows}
         columns={[
           { title: t("sessions.inspectTitle"), dataIndex: "title" },
           {
@@ -205,6 +229,16 @@ function AgentConversations({
           },
         ]}
       />
+      {(nextCursor || error) && (
+        <Button
+          loading={loading}
+          onClick={() =>
+            error ? setRevision((value) => value + 1) : setCursor(nextCursor)
+          }
+        >
+          {error ? "重试" : t("common.loadMore", "加载更多")}
+        </Button>
+      )}
       {active && (
         <Transcript
           key={active.id}

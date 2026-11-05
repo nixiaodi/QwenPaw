@@ -3,10 +3,10 @@
  * PluginSystem so they are available to both ChatV2 (via CardRegistry)
  * and ChatV1 (via customToolRenderConfig / usePlugins).
  *
- * Call once at application startup (e.g. in main.tsx or App.tsx).
+ * Call before the authenticated application shell mounts (App.tsx).
  */
 
-import { pluginSystem } from "../../../plugins/hostExternals";
+import { pluginSystem } from "../../../plugins/pluginSystem";
 import { BUILTIN_CARD_REGISTRY } from "./cards";
 import { adaptRegistryForV1 } from "./adapters/v1Adapter";
 

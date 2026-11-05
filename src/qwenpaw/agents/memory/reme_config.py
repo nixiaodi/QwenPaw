@@ -12,6 +12,7 @@ from typing import Any
 from qwenpaw.config.config import AgentProfileConfig, EmbeddingModelConfig
 
 from . import reme_root_memory as _reme_root_memory  # noqa: F401
+from . import reme_file_watch as _reme_file_watch  # noqa: F401
 
 # Keep in sync with ReMeLightMemoryCard.tsx OPENAI_COMPAT_EMBEDDING_BACKENDS.
 _OPENAI_COMPAT_EMBEDDING_BACKENDS = {
@@ -79,7 +80,7 @@ def _base_config() -> dict[str, Any]:
                         "dispatch_steps": ["update_index_step"],
                     },
                     {
-                        "backend": "watch_changes_step",
+                        "backend": "qwenpaw_watch_changes_step",
                         "dispatch_steps": [
                             {"backend": "update_index_step", "persist": False},
                         ],

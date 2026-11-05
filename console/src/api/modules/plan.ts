@@ -1,6 +1,8 @@
 import { request } from "../request";
-import { getApiUrl } from "../config";
-import { buildAuthHeaders } from "../authHeaders";
+import {
+  subscribeSessionEvents,
+  type SessionStreamOptions,
+} from "../sessionEventStream";
 import {
   withAgentRequestContext,
   type AgentRequestContext,
@@ -36,11 +38,17 @@ export interface PlanConfigResponse {
 }
 
 export const planApi = {
-  getCurrentPlan: (sessionId?: string) =>
+  getCurrentPlan: (
+    sessionId?: string,
+    options?: { signal?: AbortSignal; agentId?: string },
+  ) =>
     request<PlanStateResponse | null>(
       sessionId
         ? `/plan/current?session_id=${encodeURIComponent(sessionId)}`
         : "/plan/current",
+      ...(options
+        ? [withAgentRequestContext({ signal: options.signal }, options)]
+        : []),
     ),
 
   getPlanConfig: (context?: AgentRequestContext) => {
@@ -50,10 +58,7 @@ export const planApi = {
       : request<PlanConfigResponse>("/plan/config");
   },
 
-  updatePlanConfig: (
-    body: PlanConfigResponse,
-    context?: AgentRequestContext,
-  ) =>
+  updatePlanConfig: (body: PlanConfigResponse, context?: AgentRequestContext) =>
     request<PlanConfigResponse>(
       "/plan/config",
       withAgentRequestContext(
@@ -76,61 +81,20 @@ export function subscribePlanUpdates(
     sessionId: string | undefined,
   ) => void,
   onError?: (err: unknown) => void,
+  options?: SessionStreamOptions,
 ): () => void {
-  let aborted = false;
-  const controller = new AbortController();
-
-  async function connect() {
-    while (!aborted) {
-      try {
-        const url = getApiUrl("/plan/stream");
-        const response = await fetch(url, {
-          headers: buildAuthHeaders(),
-          signal: controller.signal,
-        });
-
-        if (!response.ok || !response.body) {
-          throw new Error(`SSE connect failed: ${response.status}`);
-        }
-
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = "";
-
-        while (!aborted) {
-          const { done, value } = await reader.read();
-          if (done) break;
-
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split("\n");
-          buffer = lines.pop() || "";
-
-          for (const line of lines) {
-            if (line.startsWith("data: ")) {
-              try {
-                const data = JSON.parse(line.slice(6));
-                if (data.type === "plan_update") {
-                  onUpdate(data.plan ?? null, data.session_id);
-                }
-              } catch {
-                // ignore parse errors
-              }
-            }
-          }
-        }
-      } catch (err) {
-        if (aborted) return;
-        onError?.(err);
-        // Reconnect after 3s
-        await new Promise((r) => setTimeout(r, 3000));
+  return subscribeSessionEvents<{
+    type: string;
+    plan?: PlanStateResponse | null;
+    session_id?: string;
+  }>(
+    "/plan/stream",
+    (data) => {
+      if (data.type === "plan_update") {
+        onUpdate(data.plan ?? null, data.session_id);
       }
-    }
-  }
-
-  connect();
-
-  return () => {
-    aborted = true;
-    controller.abort();
-  };
+    },
+    onError,
+    options,
+  );
 }

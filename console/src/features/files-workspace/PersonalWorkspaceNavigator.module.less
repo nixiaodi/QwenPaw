@@ -74,6 +74,7 @@
 }
 
 .categoryList {
+  min-width: 0;
   min-height: 0;
   overflow: auto;
   padding: 22px;
@@ -91,6 +92,22 @@
   padding: 20px;
   background: var(--surface);
 }
+
+.libraryToolbar {
+  display: flex;
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.libraryRow {
+  flex-wrap: wrap;
+  gap: 10px;
+  :global(.ant-list-item-meta) { min-width: 160px; }
+  :global(.ant-list-item-meta-content) { overflow-wrap: anywhere; }
+  :global(.ant-btn-link) { max-width: 100%; height: auto; white-space: normal; text-align: left; padding: 0; }
+}
+
+.libraryPagination { margin-top: 16px; }
 
 @media (max-width: 900px) {
   .categoryLayout {

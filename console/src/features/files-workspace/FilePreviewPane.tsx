@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { getAccessSessionGeneration, subscribeAccessSessionGeneration } from "../../api/authSession";
 import { useTranslation } from "react-i18next";
 import { buildAuthHeaders } from "../../api/authHeaders";
 import type { AgentRequestContext } from "../../api/modules/agentRequestContext";
@@ -40,7 +41,12 @@ export function fileLocatorDownloadUrl(locator: FileLocator): string | null {
   return null;
 }
 
-export default function FilePreviewPane({
+export default function FilePreviewPane(props: FilePreviewPaneProps) {
+  const generation = useSyncExternalStore(subscribeAccessSessionGeneration, getAccessSessionGeneration);
+  return <ScopedFilePreview key={JSON.stringify([generation, props.requestContext, props.locator])} {...props} />;
+}
+
+function ScopedFilePreview({
   locator,
   requestContext,
 }: FilePreviewPaneProps) {

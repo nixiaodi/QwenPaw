@@ -172,6 +172,7 @@ def create_agent_scoped_router() -> APIRouter:
     from .slash import router as slash_router
     from .checkpoints import router as checkpoints_router
     from .attachments import router as attachments_router
+    from .personal_library import router as personal_library_router
 
     router = APIRouter(
         prefix="/agents/{agentId}",
@@ -205,5 +206,6 @@ def create_agent_scoped_router() -> APIRouter:
     router.include_router(slash_router)
     router.include_router(checkpoints_router)
     router.include_router(attachments_router)
+    router.include_router(personal_library_router)
 
     return router

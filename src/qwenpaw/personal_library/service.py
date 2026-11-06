@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import mimetypes
 import os
 import re
@@ -31,6 +32,8 @@ from .models import PersonalLibraryDocument, PersonalLibraryDocumentContent
 from .paths import PersonalLibraryPathDenied, PersonalLibraryPathResolver
 from .content_extractor import SEARCHABLE_EXTENSIONS, extract_searchable_text
 from .search_index import INDEX_VERSION, PersonalLibrarySearchIndex, build_search_index
+
+logger = logging.getLogger(__name__)
 
 
 class PersonalLibraryNotFound(FileNotFoundError):
@@ -83,6 +86,11 @@ class PersonalLibraryRepository(Protocol):
         agent_id: UUID,
         document_id: UUID,
     ) -> bool: ...
+
+    async def list_documents_page(
+        self, *, owner_user_id: UUID, agent_id: UUID, query: str,
+        offset: int, limit: int,
+    ) -> tuple[list[PersonalLibraryDocument], int]: ...
 
 
 class AttachmentRepository(Protocol):
@@ -154,6 +162,16 @@ class PersonalLibraryService:
                 and "/" not in document.relative_path[len(prefix) :]
             ),
             key=lambda document: (document.name.casefold(), document.name),
+        )
+
+    async def list_page(
+        self, *, owner_user_id: UUID, agent_key: str, query: str = "",
+        offset: int = 0, limit: int = 20,
+    ) -> tuple[list[PersonalLibraryDocument], int]:
+        """只查询当前用户、当前 Agent 的资料元数据，不触发内容索引。"""
+        return await self._repository.list_documents_page(
+            owner_user_id=owner_user_id, agent_id=agent_database_id(agent_key),
+            query=query.strip(), offset=max(0, offset), limit=max(1, min(limit, 100)),
         )
 
     async def create_text(
@@ -334,6 +352,7 @@ class PersonalLibraryService:
         destination_path: str,
         overwrite: bool = False,
         agent_key: str = "default",
+        expected_updated_at: datetime | None = None,
     ) -> PersonalLibraryDocument:
         """移动当前用户的资料；写入目标并更新元数据后才移除来源。"""
         agent_id = agent_database_id(agent_key)
@@ -344,10 +363,13 @@ class PersonalLibraryService:
         )
         if document is None:
             raise PersonalLibraryNotFound("library_document_not_found")
+        self._check_revision(document, expected_updated_at)
         source = self._resolve_existing(owner_user_id, agent_id, document.relative_path)
         destination = self._resolve(owner_user_id, agent_id, destination_path)
         if not source.is_file() or source.is_symlink():
             raise PersonalLibraryNotFound("library_document_not_found")
+        if source == destination:
+            return document
         existing = await self._repository.get_by_path(
             owner_user_id=owner_user_id,
             agent_id=agent_id,
@@ -357,6 +379,7 @@ class PersonalLibraryService:
             raise PersonalLibraryConflict("library_document_exists")
         if destination.exists() and not overwrite and destination != source:
             raise PersonalLibraryConflict("library_document_exists")
+        previous_payload = destination.read_bytes() if destination.is_file() else None
         payload = source.read_bytes()
         self._atomic_write(destination, payload)
         timestamp = datetime.now(UTC)
@@ -375,7 +398,10 @@ class PersonalLibraryService:
         try:
             saved = await self._repository.save_document(moved)
         except Exception:
-            destination.unlink(missing_ok=True)
+            if previous_payload is None:
+                destination.unlink(missing_ok=True)
+            else:
+                self._atomic_write(destination, previous_payload)
             raise
         if source != destination:
             source.unlink(missing_ok=True)
@@ -388,6 +414,7 @@ class PersonalLibraryService:
         owner_user_id: UUID,
         document_id: UUID,
         agent_key: str = "default",
+        expected_updated_at: datetime | None = None,
     ) -> None:
         """删除当前用户资料库中已登记的一个文件。"""
         agent_id = agent_database_id(agent_key)
@@ -398,19 +425,39 @@ class PersonalLibraryService:
         )
         if document is None:
             raise PersonalLibraryNotFound("library_document_not_found")
+        self._check_revision(document, expected_updated_at)
         target = self._resolve_existing(owner_user_id, agent_id, document.relative_path)
         if not target.is_file() or target.is_symlink():
             raise PersonalLibraryNotFound("library_document_not_found")
-        if not await self._repository.delete_document(
-            owner_user_id=owner_user_id,
-            agent_id=agent_id,
-            document_id=document_id,
-        ):
-            raise PersonalLibraryNotFound("library_document_not_found")
-        target.unlink()
-        self._search_index_path(owner_user_id, agent_id, document.id).unlink(
-            missing_ok=True
-        )
+        # 先验证文件可移走；元数据写入失败时恢复，避免登记丢失而文件遗留。
+        staged = target.with_name(f".{secrets.token_hex(8)}.deleting")
+        target.rename(staged)
+        try:
+            if not await self._repository.delete_document(
+                owner_user_id=owner_user_id,
+                agent_id=agent_id,
+                document_id=document_id,
+            ):
+                raise PersonalLibraryNotFound("library_document_not_found")
+        except BaseException:
+            staged.rename(target)
+            raise
+        try:
+            staged.unlink()
+        except OSError:
+            await self._repository.save_document(document)
+            staged.rename(target)
+            raise
+        try:
+            self._search_index_path(owner_user_id, agent_id, document.id).unlink(missing_ok=True)
+        except OSError:
+            # 检索先按元数据过滤，遗留索引不会再次进入召回结果。
+            logger.warning("Unable to remove deleted personal-library search index", exc_info=True)
+
+    @staticmethod
+    def _check_revision(document: PersonalLibraryDocument, expected: datetime | None) -> None:
+        if expected is not None and document.updated_at != expected:
+            raise PersonalLibraryConflict("library_document_changed")
 
     async def search_text(
         self, *, owner_user_id: UUID, agent_key: str, query: str, max_results: int = 5

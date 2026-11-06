@@ -37,6 +37,14 @@ class InMemoryRepository:
         self.documents[document.id] = document
         return document
 
+    async def list_documents_page(self, *, owner_user_id, agent_id, query, offset, limit):
+        items = sorted(
+            (item for item in await self.list_documents(owner_user_id=owner_user_id, agent_id=agent_id)
+             if query.casefold() in item.relative_path.casefold()),
+            key=lambda item: (item.relative_path.casefold(), item.relative_path),
+        )
+        return items[offset:offset + limit], len(items)
+
     async def delete_document(self, *, owner_user_id: UUID, agent_id: UUID, document_id: UUID):
         document = await self.get_document(owner_user_id=owner_user_id, agent_id=agent_id, document_id=document_id)
         if document is None:

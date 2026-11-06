@@ -49,6 +49,16 @@ class CreateTextDocument(BaseModel):
     overwrite: bool = False
 
 
+class PersonalLibraryPage(BaseModel):
+    items: list[PersonalLibraryDocumentResponse]
+    total: int
+
+
+class MoveDocument(BaseModel):
+    destination_path: str = Field(min_length=1, max_length=1024)
+    expected_updated_at: datetime
+
+
 class AttachmentImport(BaseModel):
     attachment_id: UUID
     destination_path: str = Field(min_length=1)
@@ -155,6 +165,50 @@ async def list_documents(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return [_document_response(document) for document in documents]
+
+
+@router.get("/documents/page", response_model=PersonalLibraryPage)
+async def list_documents_page(
+    request: Request,
+    query: str = Query("", max_length=256),
+    offset: int = Query(0, ge=0),
+    limit: int = Query(20, ge=1, le=100),
+) -> PersonalLibraryPage:
+    workspace = await get_agent_for_request(request)
+    documents, total = await _get_service().list_page(
+        owner_user_id=_owner_id(request), agent_key=workspace.agent_id,
+        query=query, offset=offset, limit=limit,
+    )
+    return PersonalLibraryPage(items=[_document_response(doc) for doc in documents], total=total)
+
+
+@router.patch("/documents/{document_id}", response_model=PersonalLibraryDocumentResponse)
+async def move_document(request: Request, document_id: UUID, payload: MoveDocument):
+    workspace = await get_agent_for_request(request)
+    try:
+        document = await _get_service().move(
+            owner_user_id=_owner_id(request), agent_key=workspace.agent_id,
+            document_id=document_id, destination_path=payload.destination_path,
+            expected_updated_at=payload.expected_updated_at,
+        )
+    except (PersonalLibraryNotFound, PersonalLibraryConflict, ValueError) as exc:
+        raise _source_error(exc) from exc
+    return _document_response(document)
+
+
+@router.delete("/documents/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_document(
+    request: Request, document_id: UUID,
+    expected_updated_at: datetime = Query(...),
+):
+    workspace = await get_agent_for_request(request)
+    try:
+        await _get_service().delete(
+            owner_user_id=_owner_id(request), agent_key=workspace.agent_id,
+            document_id=document_id, expected_updated_at=expected_updated_at,
+        )
+    except (PersonalLibraryNotFound, PersonalLibraryConflict, ValueError) as exc:
+        raise _source_error(exc) from exc
 
 
 @router.get(

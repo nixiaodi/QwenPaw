@@ -96,6 +96,29 @@ class PostgresPersonalLibraryRepository:
             ).mappings().all()
         return [self._document_from_row(row) for row in rows]
 
+    async def list_documents_page(
+        self, *, owner_user_id: UUID, agent_id: UUID, query: str,
+        offset: int, limit: int,
+    ) -> tuple[list[PersonalLibraryDocument], int]:
+        """按文件路径搜索并分页；通配字符按普通文本处理。"""
+        where = (
+            "WHERE owner_user_id = :owner_user_id AND agent_id = :agent_id "
+            "AND strpos(lower(relative_path), lower(:query)) > 0"
+        )
+        params = dict(owner_user_id=owner_user_id, agent_id=agent_id,
+                      query=query, offset=offset, limit=limit)
+        async with self._session_factory() as session:
+            await set_request_user(session, owner_user_id)
+            total = (await session.execute(
+                text(f"SELECT count(*) FROM {self._documents_table} {where}"), params,
+            )).scalar_one()
+            rows = (await session.execute(text(
+                f"SELECT * FROM {self._documents_table} {where} "
+                "ORDER BY lower(relative_path), relative_path, id "
+                "LIMIT :limit OFFSET :offset"
+            ), params)).mappings().all()
+        return [self._document_from_row(row) for row in rows], total
+
     async def save_document(
         self,
         document: PersonalLibraryDocument,

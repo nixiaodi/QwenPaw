@@ -24,6 +24,46 @@ export interface PersonalLibraryDocumentContent
 }
 
 export const personalLibraryApi = {
+  listPage: (
+    query: string,
+    offset: number,
+    limit: number,
+    context: AgentRequestContext,
+    signal?: AbortSignal,
+  ) =>
+    request<{ items: PersonalLibraryDocument[]; total: number }>(
+      `/console/personal-library/documents/page?${new URLSearchParams({
+        query,
+        offset: String(offset),
+        limit: String(limit),
+      })}`,
+      withAgentRequestContext({ signal }, context),
+    ),
+  move: (
+    document: PersonalLibraryDocument,
+    destinationPath: string,
+    context: AgentRequestContext,
+  ) =>
+    request<PersonalLibraryDocument>(
+      `/console/personal-library/documents/${encodeURIComponent(document.id)}`,
+      withAgentRequestContext(
+        {
+          method: "PATCH",
+          body: JSON.stringify({
+            destination_path: destinationPath,
+            expected_updated_at: document.updated_at,
+          }),
+        },
+        context,
+      ),
+    ),
+  remove: (document: PersonalLibraryDocument, context: AgentRequestContext) =>
+    request<void>(
+      `/console/personal-library/documents/${encodeURIComponent(
+        document.id,
+      )}?${new URLSearchParams({ expected_updated_at: document.updated_at })}`,
+      withAgentRequestContext({ method: "DELETE" }, context),
+    ),
   downloadUrl: (id: string) =>
     `/api/console/personal-library/documents/${encodeURIComponent(
       id,

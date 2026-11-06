@@ -42,11 +42,19 @@ class PersonalLibraryPathResolver:
         """解析当前用户资料库内的一个 POSIX 相对路径。"""
         root = self.ensure_root(user_id, agent_id)
         try:
-            return resolve_workspace_path(
+            resolved = resolve_workspace_path(
                 root,
                 relative_path,
                 allow_root=allow_root,
                 portable=True,
             )
+            if relative_path.split("/")[0].casefold() == ".qwenpaw-index":
+                raise PersonalLibraryPathDenied("invalid_library_path")
+            current = root
+            for part in relative_path.split("/"):
+                current /= part
+                if current.is_symlink():
+                    raise PersonalLibraryPathDenied("library_symlink_denied")
+            return resolved
         except InvalidWorkspacePath as exc:
             raise PersonalLibraryPathDenied("invalid_library_path") from exc

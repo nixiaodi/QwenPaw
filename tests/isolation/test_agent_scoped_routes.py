@@ -492,6 +492,60 @@ async def test_unscoped_header_user_cannot_mutate_agent_configuration(
     assert manager.requested_agent_ids == []
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("role", list(AgentResourceRole))
+@pytest.mark.parametrize("method,path", [
+    ("GET", "/console/personal-library/documents/page"),
+    ("PATCH", "/console/personal-library/documents/example"),
+    ("DELETE", "/console/personal-library/documents/example"),
+])
+@pytest.mark.parametrize("scoped", [True, False])
+async def test_library_management_requires_live_agent_membership(monkeypatch, role, method, path, scoped):
+    membership = _RoleMembership(role)
+    manager = _WorkspaceManager()
+    request = _request("allowed-agent", header_agent_id="allowed-agent", method=method, resource_path=path)
+    if not scoped:
+        request.scope["path"] = "/api" + path
+        request.scope["path_params"] = {}
+    request.app.state.multi_agent_manager = manager
+    request.state.actor = _actor(PlatformRole.MEMBER)
+    monkeypatch.setattr(agent_context, "is_multi_user_enabled", lambda: True)
+    monkeypatch.setattr(agent_context, "load_config", lambda: _config())
+    monkeypatch.setattr(agent_context, "_get_agent_membership_service", lambda: membership)
+    workspace = await get_agent_for_request(request)
+    assert workspace.agent_id == "allowed-agent"
+    assert membership.allow_historical_read_only is False
+    assert membership.allowed_roles == set(AgentResourceRole)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["GET", "PATCH", "DELETE"])
+async def test_library_management_rejects_removed_member_and_governance_bypass(monkeypatch, method):
+    class DenyMembership:
+        async def require_role(self, **kwargs):
+            assert not kwargs.get("allow_historical_read_only", False)
+            raise AgentAccessDeniedError()
+
+    manager = _WorkspaceManager()
+    request = _request("allowed-agent", method=method, resource_path="/console/personal-library/documents/example")
+    request.app.state.multi_agent_manager = manager
+    request.state.actor = _actor(PlatformRole.ADMIN)
+    monkeypatch.setattr(agent_context, "is_multi_user_enabled", lambda: True)
+    monkeypatch.setattr(agent_context, "load_config", lambda: _config())
+    monkeypatch.setattr(agent_context, "_get_agent_membership_service", lambda: DenyMembership())
+    with pytest.raises(HTTPException) as denied:
+        await get_agent_for_request(request)
+    assert denied.value.status_code == 403
+    request.scope["headers"].append((b"x-agent-governance", b"runtime-config"))
+    # Rebuild headers: Starlette caches the parsed instance.
+    if hasattr(request, "_headers"):
+        del request._headers
+    with pytest.raises(HTTPException) as governance:
+        await get_agent_for_request(request)
+    assert governance.value.status_code == 403
+    assert manager.requested_agent_ids == []
+
+
 def test_agent_context_is_isolated_and_restored_after_request(monkeypatch) -> None:
     monkeypatch.setattr(
         "qwenpaw.app.agent_context.get_active_agent_id",

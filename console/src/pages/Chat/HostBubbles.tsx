@@ -19,7 +19,7 @@ import DeferredToolOutput from "./DeferredToolOutput";
 import RequestActions from "@agentscope-ai/chat/lib/AgentScopeRuntimeWebUI/core/AgentScopeRuntime/Request/Actions";
 import { TranscriptText } from "./TranscriptText";
 import { LatestMessageEditor } from "./components/LatestMessageEditor";
-import { normalizeSandboxArtifactLinks } from "./sandboxArtifactLink";
+import StreamingMarkdown from "./StreamingMarkdown";
 import { artifactDisplayName, deliveredArtifactsFromMessages, type DeliveredArtifact } from "./deliveredArtifacts";
 import { ToolResponseStatusContext } from "../../components/Chat/ToolCards/shared/ToolResponseContext";
 import AgentScopeRuntimeResponseBuilder from "@agentscope-ai/chat/lib/AgentScopeRuntimeWebUI/core/AgentScopeRuntime/Response/Builder";
@@ -42,7 +42,6 @@ import Files from "@agentscope-ai/chat/lib/DefaultCards/Files";
 import Audios from "@agentscope-ai/chat/lib/DefaultCards/Audios";
 import { Bubble, Markdown } from "@agentscope-ai/chat";
 import { Avatar, Flex } from "antd";
-import { renderableCodeComponents } from "../../components/RenderableCodeBlock";
 import {
   useChatScalarSnapshot,
   useChatListSnapshot,
@@ -63,7 +62,7 @@ function sortByOrder<T extends { item: { order?: number } }>(arr: T[]): T[] {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyCardProps = any;
 
-function HostMessage({ data, delivered = [] }: { data: IAgentScopeRuntimeMessage; delivered?: DeliveredArtifact[] }) {
+function HostMessage({ data, delivered = [], responseStreaming }: { data: IAgentScopeRuntimeMessage; delivered?: DeliveredArtifact[]; responseStreaming?: boolean }) {
   const replaceMediaURL = useChatAnywhereOptions(
     (options) => options.api?.replaceMediaURL,
   );
@@ -81,11 +80,11 @@ function HostMessage({ data, delivered = [] }: { data: IAgentScopeRuntimeMessage
         switch (item.type) {
           case AgentScopeRuntimeContentType.TEXT:
             return (
-              <Markdown
+              <StreamingMarkdown
                 key={index}
-                components={renderableCodeComponents}
-                content={normalizeSandboxArtifactLinks(item.text || "", delivered)}
-                cursor={item.status === AgentScopeRuntimeRunStatus.InProgress}
+                content={item.text || ""}
+                delivered={delivered}
+                streaming={responseStreaming !== false && item.status === AgentScopeRuntimeRunStatus.InProgress}
               />
             );
           case AgentScopeRuntimeContentType.REFUSAL:
@@ -181,7 +180,7 @@ function DefaultHostResponseCard({
         const itemKey = `${item.type}:${item.id}:${index}`;
         switch (item.type) {
           case AgentScopeRuntimeMessageType.MESSAGE:
-            return <HostMessage key={itemKey} data={item} delivered={delivered} />;
+            return <HostMessage key={`${data.id}:${itemKey}`} data={item} delivered={delivered} responseStreaming={!readOnly && AgentScopeRuntimeResponseBuilder.maybeGenerating(data)} />;
           case AgentScopeRuntimeMessageType.PLUGIN_CALL:
           case AgentScopeRuntimeMessageType.PLUGIN_CALL_OUTPUT:
           case AgentScopeRuntimeMessageType.TOOL_CALL:

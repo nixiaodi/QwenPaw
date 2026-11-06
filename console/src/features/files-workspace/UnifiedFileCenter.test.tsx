@@ -9,7 +9,10 @@ vi.mock("./TemporaryAttachmentsPanel", () => ({
   default: () => <div>attachment-panel</div>,
 }));
 vi.mock("./PersonalLibraryPanel", () => ({
-  default: () => <div>library-panel</div>,
+  default: ({ onDocumentChanged }: { onDocumentChanged: (id: string, document: unknown) => void }) => <div>library-panel
+    <button onClick={() => onDocumentChanged("library-doc", { id: "library-doc", relative_path: "归档/合同.md" })}>移动资料</button>
+    <button onClick={() => onDocumentChanged("library-doc", null)}>删除资料</button>
+  </div>,
 }));
 vi.mock("./ArtifactPanel", () => ({
   default: ({ onOpen }: { onOpen?: (locator: unknown) => void }) => <div>
@@ -81,5 +84,15 @@ describe("UnifiedFileCenter", () => {
     await user.click(screen.getByRole("tab", { name: "产物" }));
     await user.click(screen.getByRole("button", { name: "查看产物" }));
     expect(screen.getByText("preview:report.md")).toBeVisible();
+  });
+
+  it("updates the selected preview after moving and closes it after deletion", async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<UnifiedFileCenter agentId="agent-a" requestContext={{ agentId: "agent-a" }} initialLocator={{ category: "library", agentId: "agent-a", stableId: "library-doc", relativePath: "合同.md" }} />);
+    expect(screen.getByText("preview:合同.md")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "移动资料" }));
+    expect(screen.getByText("preview:归档/合同.md")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "删除资料" }));
+    expect(screen.queryByText("preview:归档/合同.md")).not.toBeInTheDocument();
   });
 });

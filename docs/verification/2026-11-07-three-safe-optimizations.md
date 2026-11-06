@@ -2,6 +2,8 @@
 
 日期：2026-11-07。基于当前二开工作区（起始 HEAD `0e4b6ccbd21ca5f73e0d18df3b7a6a8dcbe54dfe`），参考 `refs/upstream-tags/v2.1.0` 的 `HostBubbles.tsx` 和文件工作区设计。没有整体合并上游，也没有提交、推送或部署。
 
+以上为实施阶段记录；后续已按用户要求提交、推送并部署到服务器，新增隔离 PostgreSQL 及公网验证结果见 [发布验收](../long-answer-personal-library-release-20261107.md)。
+
 ## 已实现
 
 ### 长回答渲染

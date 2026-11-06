@@ -10,6 +10,8 @@
 
 本次使用当前 `main` 分支提交并推送至 `origin/main`。`upstream` 指向 `https://github.com/agentscope-ai/QwenPaw.git`，用于对照和获取上游更新；远程配置属于当前克隆的 Git 配置，不是随代码提交分发的文件。
 
+应用提交 `1509174748df0aa912f19d2feca8be6642ce950c` 已完成服务器更新并通过健康、资源和资料管理检查，详细证据与回滚信息见 [发布验收](long-answer-personal-library-release-20261107.md)。
+
 ## 一、已完成的代码优化
 
 ### 1. 长回答渲染
